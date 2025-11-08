@@ -89,7 +89,10 @@ def is_spotdl_available():
 ffmpeg_exe = ensure_ffmpeg()
 spotdl_installed = is_spotdl_available()
 
-# Check requirements silently
+# Better diagnostics in app logs
+st.write("Debug: ffmpeg path ->", ffmpeg_exe)
+st.write("Debug: spotdl available ->", spotdl_installed)
+
 if not spotdl_installed:
     st.error("⚠️ SpotDL is not installed! Please add `spotdl` to requirements.txt (e.g. `spotdl>=4.2.5`) and redeploy.")
     st.stop()
@@ -106,18 +109,8 @@ playlist_url = st.text_input(
 
 with st.expander("⚙️ Download Settings"):
     audio_format = st.selectbox("Audio Format", ["mp3", "m4a", "flac", "opus", "ogg"])
-    audio_quality = st.selectbox("Bitrate", ["320k", "256k", "192k", "128k"], index=0)
+    audio_quality = st.selectbox("Bitrate", ["128k", "192k", "256k", "320k"])
     max_songs = st.number_input("Maximum songs to download (0 = all)", 0, 100, 0)
-    use_cookies = st.checkbox("Use YouTube cookies (helps with blocked content)", value=False)
-    retry_failed = st.checkbox("Retry failed downloads", value=True)
-    
-    if use_cookies:
-        st.info("📝 To use cookies: Export your YouTube cookies using a browser extension like 'Get cookies.txt LOCALLY' and upload the cookies.txt file to the app directory.")
-        cookies_file = st.file_uploader("Upload cookies.txt file", type=['txt'])
-        if cookies_file:
-            with open("cookies.txt", "wb") as f:
-                f.write(cookies_file.getvalue())
-            st.success("✅ Cookies file uploaded successfully!")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -188,7 +181,7 @@ def extract_tracks_from_spotify(playlist_data):
 
 
 # ---------------- SpotDL Download Function ----------------
-def download_with_spotdl(playlist_url, output_dir, audio_format="mp3", bitrate="320k", ffmpeg_path=None, use_cookies=False):
+def download_with_spotdl(playlist_url, output_dir, audio_format="mp3", bitrate="320k", ffmpeg_path=None):
     """Download playlist using spotdl command called as a Python module."""
     try:
         # Use python -m spotdl to avoid shell PATH issues and pass explicit ffmpeg path
@@ -199,13 +192,7 @@ def download_with_spotdl(playlist_url, output_dir, audio_format="mp3", bitrate="
             "--format", audio_format,
             "--bitrate", bitrate,
             "--print-errors",
-            "--threads", "4",  # Parallel downloads
-            "--audio-provider", "youtube-music",
         ]
-
-        # Add cookie file if available
-        if use_cookies and os.path.exists("cookies.txt"):
-            cmd.extend(["--cookie-file", "cookies.txt"])
 
         if ffmpeg_path:
             cmd.extend(["--ffmpeg", ffmpeg_path])
@@ -234,37 +221,6 @@ def download_with_spotdl(playlist_url, output_dir, audio_format="mp3", bitrate="
         return False
 
 
-def download_individual_track(track_url, output_dir, audio_format="mp3", bitrate="320k", ffmpeg_path=None, use_cookies=False):
-    """Download a single track with spotdl."""
-    try:
-        cmd = [
-            sys.executable, "-m", "spotdl",
-            track_url,
-            "--output", output_dir,
-            "--format", audio_format,
-            "--bitrate", bitrate,
-            "--audio-provider", "youtube-music",
-        ]
-
-        if use_cookies and os.path.exists("cookies.txt"):
-            cmd.extend(["--cookie-file", "cookies.txt"])
-
-        if ffmpeg_path:
-            cmd.extend(["--ffmpeg", ffmpeg_path])
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=180
-        )
-
-        return result.returncode == 0, result.stdout + result.stderr
-
-    except Exception as e:
-        return False, str(e)
-
-
 # ---------------- Session State ----------------
 if "playlist_tracks" not in st.session_state:
     st.session_state.playlist_tracks = []
@@ -276,7 +232,7 @@ if "logs" not in st.session_state:
 
 def append_log(msg):
     st.session_state.logs.append(msg)
-    log_area.text("\n".join(st.session_state.logs[-50:]))
+    log_area.text("\n".join(st.session_state.logs[-30:]))
 
 # ---------------- Fetch Button ----------------
 if fetch_btn:
@@ -316,7 +272,7 @@ if fetch_btn:
 
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 401:
-                st.error("❌ Authentication error. Please check your Spotify credentials.")
+                st.error("❌ Authentication error. Please contact support.")
             else:
                 st.error(f"❌ Spotify API Error: {e}")
         except Exception as e:
@@ -336,80 +292,29 @@ if download_btn:
         try:
             # Download using spotdl
             append_log(f"📥 Downloading with SpotDL...")
-            if use_cookies and os.path.exists("cookies.txt"):
-                append_log("🍪 Using YouTube cookies for authentication")
-            
             status_text.text("Downloading songs...")
 
             download_count = 0
-            failed_count = 0
-            failed_tracks = []
-            
-            for output in download_with_spotdl(playlist_url, temp_dir, audio_format, audio_quality, ffmpeg_path=ffmpeg_exe, use_cookies=use_cookies):
+            for output in download_with_spotdl(playlist_url, temp_dir, audio_format, audio_quality, ffmpeg_path=ffmpeg_exe):
                 append_log(output)
-                
-                # Track successful downloads
+                # SpotDL output may vary, adjust matching if needed
                 if "Downloaded" in output or "has been downloaded" in output:
                     download_count += 1
-                    if st.session_state.playlist_tracks:
-                        progress_bar.progress(min(download_count / len(st.session_state.playlist_tracks), 1.0))
-                
-                # Track failures
-                elif "Error" in output or "ERROR" in output:
-                    failed_count += 1
-                    # Extract track name if possible
-                    if "AudioProviderError" in output or "YT-DLP" in output:
-                        failed_tracks.append(output)
+                    progress_bar.progress(min(download_count / max(len(st.session_state.playlist_tracks), 1), 1.0))
 
             # Check if files were downloaded
             downloaded_files = list(Path(temp_dir).glob(f"*.{audio_format}"))
 
             if downloaded_files:
                 append_log(f"\n✅ Successfully downloaded {len(downloaded_files)} songs")
-                
-                if failed_count > 0:
-                    append_log(f"⚠️ Failed to download {failed_count} songs")
-                    append_log("💡 Tip: Enable 'Use YouTube cookies' in settings to fix most download issues")
-                    
-                    if retry_failed and failed_tracks and st.session_state.playlist_tracks:
-                        append_log("\n🔄 Retrying failed downloads individually...")
-                        
-                        for track in st.session_state.playlist_tracks:
-                            track_url = track.get("spotify_url")
-                            if track_url:
-                                # Check if this track was downloaded
-                                track_name_safe = re.sub(r'[^\w\s-]', '', track.get("name", ""))
-                                existing = list(Path(temp_dir).glob(f"*{track_name_safe[:20]}*.{audio_format}"))
-                                
-                                if not existing:
-                                    append_log(f"Retrying: {track.get('name')} - {track.get('artists')}")
-                                    success, output = download_individual_track(
-                                        track_url, temp_dir, audio_format, audio_quality, 
-                                        ffmpeg_path=ffmpeg_exe, use_cookies=use_cookies
-                                    )
-                                    if success:
-                                        append_log(f"✅ Successfully downloaded on retry")
-                                        download_count += 1
-                                    else:
-                                        append_log(f"❌ Still failed: {track.get('name')}")
-                                    
-                                    time.sleep(2)  # Rate limiting
-                        
-                        # Recount files after retry
-                        downloaded_files = list(Path(temp_dir).glob(f"*.{audio_format}"))
 
-                # Create ZIP file with minimal compression for speed
-                append_log("📦 Creating ZIP file (fast mode)...")
-                status_text.text("Creating ZIP file...")
-                
+                # Create ZIP file
+                append_log("📦 Creating ZIP file...")
                 zip_buffer = BytesIO()
 
-                # Use ZIP_STORED (no compression) for maximum speed
-                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_STORED) as zip_file:
-                    for i, file_path in enumerate(downloaded_files):
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                    for file_path in downloaded_files:
                         zip_file.write(file_path, file_path.name)
-                        if i % 5 == 0:
-                            progress_bar.progress(min(0.8 + (0.2 * i / len(downloaded_files)), 1.0))
 
                 zip_buffer.seek(0)
 
@@ -432,25 +337,8 @@ if download_btn:
                 )
 
                 st.info(f"💾 Click the button above to download all songs as a ZIP file")
-                
-                # Show failed tracks summary
-                if failed_count > 0:
-                    with st.expander(f"⚠️ View {failed_count} Failed Downloads"):
-                        st.markdown("**These songs could not be downloaded:**")
-                        st.markdown("Common reasons: Geo-restrictions, removed content, or YouTube rate limiting")
-                        for fail_msg in failed_tracks[:20]:  # Show first 20
-                            st.text(fail_msg)
-                            
             else:
                 st.error("❌ No songs were downloaded. Check the logs above for errors.")
-                st.markdown("""
-                **Common Solutions:**
-                1. ✅ Enable "Use YouTube cookies" and upload your cookies.txt file
-                2. 🔄 Update spotdl: `pip install --upgrade spotdl yt-dlp`
-                3. 🌍 Try using a VPN (especially for regional content)
-                4. ⏰ Wait 10-15 minutes if you've been downloading a lot (rate limiting)
-                5. 📝 Try downloading individual songs instead of the entire playlist
-                """)
 
         except Exception as e:
             st.error(f"❌ Error during download: {e}")
@@ -472,7 +360,7 @@ with st.expander("💡 How to Use"):
 
     First, install SpotDL:
     ```bash
-    pip install spotdl yt-dlp
+    pip install spotdl
     ```
 
     ### Steps:
@@ -497,58 +385,12 @@ with st.expander("💡 How to Use"):
     - Songs include proper metadata (artist, album, cover art)
     - Download speed depends on your internet connection
     - For large playlists, be patient - quality takes time! 
-    - Default bitrate is 320k (highest quality MP3)
-
-    ### 🔧 Troubleshooting Hindi/Regional Songs:
-    
-    **If you get "YT-DLP download error" or "AudioProviderError":**
-    
-    1. **Use YouTube Cookies** (Most Effective - 90% success rate):
-       - Install browser extension: **"Get cookies.txt LOCALLY"** ([Chrome](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) / [Firefox](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/))
-       - Go to youtube.com or music.youtube.com
-       - **Log in to your Google account**
-       - Click the extension icon and download cookies.txt
-       - In the app, enable "Use YouTube cookies" checkbox
-       - Upload your cookies.txt file
-       - Try downloading again
-    
-    2. **Update SpotDL and yt-dlp**:
-       ```bash
-       pip install --upgrade spotdl yt-dlp
-       ```
-    
-    3. **Geo-Restrictions**:
-       - Some Hindi/regional content may be geo-blocked outside India
-       - Use a VPN connected to India for Indian content
-       - Use cookies from a logged-in YouTube account
-    
-    4. **Check Content Availability**:
-       - Open the YouTube Music link manually
-       - If the video doesn't play, it's removed/restricted
-       - Try searching for alternate versions of the song
-    
-    5. **Rate Limiting**:
-       - YouTube temporarily blocks too many requests
-       - Wait 10-15 minutes and try again
-       - Download in smaller batches (10-20 songs at a time)
-       - Enable "Retry failed downloads" option
-    
-    6. **Individual Track Download**:
-       - If a specific song fails, try downloading it separately
-       - Use the Spotify track URL instead of playlist URL
-       - Example: `https://open.spotify.com/track/TRACK_ID`
 
     ### Formats Available:
     - **MP3**: Best compatibility (recommended)
     - **M4A**: Good quality, smaller file size
     - **FLAC**: Lossless quality, large files
     - **OPUS/OGG**: Modern formats, good compression
-
-    ### Why Cookies Work:
-    - YouTube treats logged-in users more favorably
-    - Reduces bot detection and captcha challenges
-    - Bypasses some geo-restrictions
-    - Increases download success rate significantly
 
     ### Legal Note:
     ⚠️ This tool is for personal use only. Please respect copyright laws and terms of service.
@@ -557,4 +399,3 @@ with st.expander("💡 How to Use"):
 # Footer
 st.markdown("---")
 st.markdown("Made with ❤️ using Streamlit & SpotDL | Powered by Spotify API & YouTube Music")
-st.markdown("💡 **Pro Tip**: For best results with Hindi/regional songs, use YouTube cookies!")
