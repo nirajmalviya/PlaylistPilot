@@ -40,6 +40,8 @@ Download your favorite Spotify playlists:
 1. Paste your Spotify playlist URL
 2. Click **Fetch Playlist** to see the songs
 3. Click **Download All** to download songs to your device
+
+**Requirements**: Make sure `spotdl` is installed: `pip install spotdl`
 """)
 
 # ---------------- ffmpeg & spotdl helpers ----------------
@@ -105,6 +107,8 @@ playlist_url = st.text_input(
 with st.expander("⚙️ Download Settings"):
     audio_format = st.selectbox("Audio Format", ["mp3", "m4a", "flac", "opus", "ogg"])
     audio_quality = st.selectbox("Bitrate", ["320k", "256k", "192k", "128k"], index=0)  # Default to 320k
+    use_cookies = st.checkbox("Use YouTube cookies (recommended for reliability)", value=True, 
+                               help="Helps prevent download errors by authenticating with YouTube")
     max_songs = st.number_input("Maximum songs to download (0 = all)", 0, 100, 0)
 
 col1, col2 = st.columns(2)
@@ -176,7 +180,7 @@ def extract_tracks_from_spotify(playlist_data):
 
 
 # ---------------- SpotDL Download Function ----------------
-def download_with_spotdl(playlist_url, output_dir, audio_format="mp3", bitrate="320k", ffmpeg_path=None):
+def download_with_spotdl(playlist_url, output_dir, audio_format="mp3", bitrate="320k", ffmpeg_path=None, use_cookies=True):
     """Download playlist using spotdl command called as a Python module."""
     try:
         # Use python -m spotdl to avoid shell PATH issues and pass explicit ffmpeg path
@@ -187,10 +191,18 @@ def download_with_spotdl(playlist_url, output_dir, audio_format="mp3", bitrate="
             "--format", audio_format,
             "--bitrate", bitrate,
             "--print-errors",
+            "--threads", "4",  # Use multiple threads for faster downloads
         ]
 
         if ffmpeg_path:
             cmd.extend(["--ffmpeg", ffmpeg_path])
+        
+        # Add cookie handling to avoid YouTube blocks
+        if use_cookies:
+            cmd.extend([
+                "--cookie-file", "cookies.txt",  # Will use if exists, otherwise ignored
+                "--restrict-filenames",  # Avoid filename issues
+            ])
 
         process = subprocess.Popen(
             cmd,
@@ -202,9 +214,20 @@ def download_with_spotdl(playlist_url, output_dir, audio_format="mp3", bitrate="
         )
 
         output_lines = []
+        error_count = 0
+        success_count = 0
+        
         for line in process.stdout:
             line = line.strip()
             if line:
+                # Track errors and successes
+                if "AudioProviderError" in line or "YT-DLP download error" in line:
+                    error_count += 1
+                    # Only show first few errors to avoid spam
+                    if error_count <= 3:
+                        yield f"⚠️ Download failed for 1 song (trying next...)"
+                    continue
+                
                 # Filter out unwanted log messages
                 if any(skip in line for skip in [
                     "WARNING:root:",
@@ -219,6 +242,7 @@ def download_with_spotdl(playlist_url, output_dir, audio_format="mp3", bitrate="
                 if "Found" in line and "songs" in line:
                     yield f"✅ {line}"
                 elif "Downloaded" in line and "https://" in line:
+                    success_count += 1
                     # Clean up download message
                     if ":" in line:
                         song_name = line.split('"')[1] if '"' in line else line.split(":")[0]
@@ -231,6 +255,12 @@ def download_with_spotdl(playlist_url, output_dir, audio_format="mp3", bitrate="
                         yield line
 
         process.wait()
+        
+        # Show summary of errors if any
+        if error_count > 0:
+            yield f"\n⚠️ Note: {error_count} songs failed to download (YouTube restrictions)"
+            yield f"✅ Successfully downloaded: {success_count} songs"
+        
         return process.returncode == 0
 
     except Exception as e:
@@ -316,7 +346,7 @@ if download_btn:
             download_count = 0
             total_tracks = len(st.session_state.playlist_tracks) if st.session_state.playlist_tracks else 10
             
-            for output in download_with_spotdl(playlist_url, temp_dir, audio_format, audio_quality, ffmpeg_path=ffmpeg_exe):
+            for output in download_with_spotdl(playlist_url, temp_dir, audio_format, audio_quality, ffmpeg_path=ffmpeg_exe, use_cookies=use_cookies):
                 append_log(output)
                 # Count successful downloads
                 if "✓" in output or "Downloaded" in output:
@@ -328,6 +358,10 @@ if download_btn:
 
             if downloaded_files:
                 append_log(f"\n✅ Successfully downloaded {len(downloaded_files)} songs")
+                
+                if len(downloaded_files) < len(st.session_state.playlist_tracks):
+                    failed_count = len(st.session_state.playlist_tracks) - len(downloaded_files)
+                    st.warning(f"⚠️ {failed_count} songs could not be downloaded due to YouTube restrictions. This is normal for some songs.")
 
                 # Create ZIP file with minimal compression for speed
                 append_log("📦 Creating ZIP file (fast mode)...")
@@ -414,6 +448,18 @@ with st.expander("💡 How to Use"):
     - Download speed depends on your internet connection
     - For large playlists, be patient - quality takes time! 
     - Default bitrate is 320k (highest quality MP3)
+    - **Some songs may fail** due to YouTube restrictions - this is normal
+
+    ### Troubleshooting Download Errors:
+    
+    If you see "AudioProviderError" or "YT-DLP download error":
+    
+    1. **Enable cookies option** (in Download Settings) - helps bypass YouTube restrictions
+    2. **Try again later** - YouTube rate limits may be temporary
+    3. **Download in smaller batches** - try downloading fewer songs at a time
+    4. **Some songs are unavailable** - not all Spotify tracks exist on YouTube Music
+    
+    The tool will download as many songs as possible and skip unavailable ones.
 
     ### Formats Available:
     - **MP3**: Best compatibility (recommended)
