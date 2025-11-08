@@ -17,8 +17,8 @@ from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB
 from mutagen.mp3 import MP3
 
 # ---------------- CONFIG ----------------
-SPOTIFY_CLIENT_ID = "b8d625c4e9ea44ef977009c72398f32e"
-SPOTIFY_CLIENT_SECRET = "2b82b875364d4616b7476197e7c2c156"
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 
 st.set_page_config(page_title="Spotify Playlist Downloader", layout="wide")
 st.title("🎵 Spotify Playlist Downloader")
