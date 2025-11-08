@@ -11,25 +11,12 @@ from io import BytesIO
 import subprocess
 import tempfile
 import shutil
-from dotenv import load_dotenv
-import sys
-
-# Added imports
-import shutil as _shutil
-try:
-    import imageio_ffmpeg as iio_ffmpeg
-except Exception:
-    iio_ffmpeg = None
 
 # ---------------- CONFIG ----------------
-load_dotenv()
+# Hardcoded Spotify API credentials
+SPOTIFY_CLIENT_ID = "b8d625c4e9ea44ef977009c72398f32e"
+SPOTIFY_CLIENT_SECRET = "2b82b875364d4616b7476197e7c2c156"
 
-SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
-SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
-
-if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
-    st.error("⚠️ Spotify credentials not found! Please set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET in .env or Streamlit environment.")
-    st.stop()
 # ----------------------------------------
 
 st.set_page_config(page_title="Spotify Playlist Downloader", layout="wide")
@@ -44,61 +31,20 @@ Download your favorite Spotify playlists:
 **Requirements**: Make sure `spotdl` is installed: `pip install spotdl`
 """)
 
-# ---------------- ffmpeg & spotdl helpers ----------------
-def ensure_ffmpeg():
-    """
-    Ensure an ffmpeg binary is available.
-    Returns path to ffmpeg executable or None.
-    Strategy:
-      1) check system PATH via shutil.which
-      2) fallback to imageio-ffmpeg.get_ffmpeg_exe() if available
-    """
-    ff = _shutil.which("ffmpeg")
-    if ff:
-        return ff
 
-    # fallback to imageio-ffmpeg (downloads a binary into cache)
-    if iio_ffmpeg is not None:
-        try:
-            ff_exe = iio_ffmpeg.get_ffmpeg_exe()
-            ff_dir = os.path.dirname(ff_exe)
-            # Prepend to PATH so other checks find it
-            os.environ["PATH"] = ff_dir + os.pathsep + os.environ.get("PATH", "")
-            # confirm which now
-            if _shutil.which("ffmpeg") is None:
-                # If which still returns None, use explicit path
-                return ff_exe
-            return _shutil.which("ffmpeg") or ff_exe
-        except Exception as e:
-            print("imageio-ffmpeg failed:", e)
-            return None
-    return None
-
-
-def is_spotdl_available():
-    """Return True if spotdl module/CLI is available."""
-    # prefer python -m spotdl check to avoid reliance on shell PATH
+# Check if spotdl is installed
+def check_spotdl():
     try:
-        proc = subprocess.run([sys.executable, "-m", "spotdl", "--version"],
-                              capture_output=True, text=True, timeout=6)
-        return proc.returncode == 0
-    except Exception:
+        result = subprocess.run(['spotdl', '--version'], capture_output=True, text=True, timeout=5)
+        return result.returncode == 0
+    except:
         return False
 
 
-ffmpeg_exe = ensure_ffmpeg()
-spotdl_installed = is_spotdl_available()
-
-# Better diagnostics in app logs
-st.write("Debug: ffmpeg path ->", ffmpeg_exe)
-st.write("Debug: spotdl available ->", spotdl_installed)
+spotdl_installed = check_spotdl()
 
 if not spotdl_installed:
-    st.error("⚠️ SpotDL is not installed! Please add `spotdl` to requirements.txt (e.g. `spotdl>=4.2.5`) and redeploy.")
-    st.stop()
-
-if not ffmpeg_exe:
-    st.error("⚠️ FFmpeg not found. Add `ffmpeg` to apt.txt (Streamlit Cloud) or add `imageio-ffmpeg` to requirements.txt.")
+    st.error("⚠️ SpotDL is not installed! Please run: `pip install spotdl`")
     st.stop()
 
 # ---------------- UI inputs ----------------
@@ -111,6 +57,8 @@ with st.expander("⚙️ Download Settings"):
     audio_format = st.selectbox("Audio Format", ["mp3", "m4a", "flac", "opus", "ogg"])
     audio_quality = st.selectbox("Bitrate", ["128k", "192k", "256k", "320k"])
     max_songs = st.number_input("Maximum songs to download (0 = all)", 0, 100, 0)
+    use_fallback = st.checkbox("Use fallback sources (Soundcloud, Bandcamp)", value=True, 
+                                help="Try alternative sources when YouTube Music fails")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -121,6 +69,7 @@ with col2:
 log_area = st.empty()
 progress_bar = st.progress(0)
 status_text = st.empty()
+
 
 # ---------------- Spotify API Functions ----------------
 def get_spotify_token(client_id, client_secret):
@@ -180,23 +129,22 @@ def extract_tracks_from_spotify(playlist_data):
     return tracks
 
 
-# ---------------- SpotDL Download Function ----------------
-def download_with_spotdl(playlist_url, output_dir, audio_format="mp3", bitrate="320k", ffmpeg_path=None):
-    """Download playlist using spotdl command called as a Python module."""
+# ---------------- Enhanced SpotDL Download Function ----------------
+def download_with_spotdl(playlist_url, output_dir, audio_format="mp3", bitrate="320k", use_fallback=True):
+    """Download playlist using spotdl with fallback options."""
     try:
-        # Use python -m spotdl to avoid shell PATH issues and pass explicit ffmpeg path
+        # First attempt with YouTube Music (default)
         cmd = [
-            sys.executable, "-m", "spotdl",
+            'spotdl',
             playlist_url,
-            "--output", output_dir,
-            "--format", audio_format,
-            "--bitrate", bitrate,
-            "--print-errors",
+            '--output', output_dir,
+            '--format', audio_format,
+            '--bitrate', bitrate,
+            '--print-errors'
         ]
 
-        if ffmpeg_path:
-            cmd.extend(["--ffmpeg", ffmpeg_path])
-
+        yield "🎵 Attempting download from YouTube Music..."
+        
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -207,14 +155,90 @@ def download_with_spotdl(playlist_url, output_dir, audio_format="mp3", bitrate="
         )
 
         output_lines = []
+        failed_tracks = []
+        
         for line in process.stdout:
             line = line.strip()
             if line:
                 output_lines.append(line)
                 yield line
+                
+                # Detect failures
+                if "AudioProviderError" in line or "YT-DLP download error" in line:
+                    failed_tracks.append(line)
 
         process.wait()
-        return process.returncode == 0
+        
+        # If we have failures and fallback is enabled, try alternative sources
+        if failed_tracks and use_fallback:
+            yield "\n⚠️ Some tracks failed. Trying alternative sources..."
+            yield "🔄 Retrying with Soundcloud as audio provider..."
+            
+            # Retry with different audio provider
+            cmd_fallback = [
+                'spotdl',
+                playlist_url,
+                '--output', output_dir,
+                '--format', audio_format,
+                '--bitrate', bitrate,
+                '--audio-provider', 'youtube-music',
+                '--audio-provider', 'soundcloud',
+                '--print-errors',
+                '--overwrite', 'skip'  # Don't re-download successful tracks
+            ]
+            
+            process_fallback = subprocess.Popen(
+                cmd_fallback,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            for line in process_fallback.stdout:
+                line = line.strip()
+                if line:
+                    yield line
+            
+            process_fallback.wait()
+            
+            # Try one more time with different settings if still failing
+            remaining_failures = [f for f in failed_tracks if "AudioProviderError" in f]
+            if remaining_failures:
+                yield "\n🔄 Final attempt with relaxed search settings..."
+                
+                cmd_final = [
+                    'spotdl',
+                    playlist_url,
+                    '--output', output_dir,
+                    '--format', audio_format,
+                    '--bitrate', bitrate,
+                    '--audio-provider', 'youtube-music',
+                    '--audio-provider', 'youtube',
+                    '--audio-provider', 'soundcloud',
+                    '--print-errors',
+                    '--overwrite', 'skip',
+                    '--search-query', '{artists} - {title}'  # Simpler search query
+                ]
+                
+                process_final = subprocess.Popen(
+                    cmd_final,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True
+                )
+                
+                for line in process_final.stdout:
+                    line = line.strip()
+                    if line:
+                        yield line
+                
+                process_final.wait()
+
+        return True
 
     except Exception as e:
         yield f"Error: {str(e)}"
@@ -233,6 +257,7 @@ if "logs" not in st.session_state:
 def append_log(msg):
     st.session_state.logs.append(msg)
     log_area.text("\n".join(st.session_state.logs[-30:]))
+
 
 # ---------------- Fetch Button ----------------
 if fetch_btn:
@@ -290,15 +315,14 @@ if download_btn:
         temp_dir = tempfile.mkdtemp()
 
         try:
-            # Download using spotdl
-            append_log(f"📥 Downloading with SpotDL...")
+            # Download using spotdl with fallback
+            append_log(f"📥 Downloading with SpotDL (with fallback enabled: {use_fallback})...")
             status_text.text("Downloading songs...")
 
             download_count = 0
-            for output in download_with_spotdl(playlist_url, temp_dir, audio_format, audio_quality, ffmpeg_path=ffmpeg_exe):
+            for output in download_with_spotdl(playlist_url, temp_dir, audio_format, audio_quality, use_fallback):
                 append_log(output)
-                # SpotDL output may vary, adjust matching if needed
-                if "Downloaded" in output or "has been downloaded" in output:
+                if "Downloaded" in output:
                     download_count += 1
                     progress_bar.progress(min(download_count / max(len(st.session_state.playlist_tracks), 1), 1.0))
 
@@ -380,11 +404,18 @@ with st.expander("💡 How to Use"):
        - Click "Download ZIP File" to save to your device
        - Extract the ZIP file to access your songs
 
+    ### Fallback Sources:
+    - **Primary**: YouTube Music (best quality)
+    - **Fallback 1**: Soundcloud
+    - **Fallback 2**: Regular YouTube
+    - Enable "Use fallback sources" in settings for automatic retry
+
     ### Tips:
-    - SpotDL downloads high-quality audio from YouTube Music
+    - SpotDL downloads high-quality audio from multiple sources
     - Songs include proper metadata (artist, album, cover art)
     - Download speed depends on your internet connection
-    - For large playlists, be patient - quality takes time! 
+    - For large playlists, be patient - quality takes time!
+    - If some songs fail, the tool will automatically try alternative sources
 
     ### Formats Available:
     - **MP3**: Best compatibility (recommended)
@@ -392,10 +423,15 @@ with st.expander("💡 How to Use"):
     - **FLAC**: Lossless quality, large files
     - **OPUS/OGG**: Modern formats, good compression
 
+    ### Troubleshooting:
+    - If downloads fail, enable fallback sources in settings
+    - Some region-restricted songs may not be available
+    - Try lowering bitrate if downloads are slow
+
     ### Legal Note:
     ⚠️ This tool is for personal use only. Please respect copyright laws and terms of service.
     """)
 
 # Footer
 st.markdown("---")
-st.markdown("Made with ❤️ using Streamlit & SpotDL | Powered by Spotify API & YouTube Music")
+st.markdown("Made with ❤️ using Streamlit & SpotDL | Multi-source download: YouTube Music, Soundcloud, YouTube")
