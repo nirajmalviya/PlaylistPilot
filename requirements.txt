@@ -1,6 +1,7 @@
 streamlit>=1.20
 pandas>=2.0
 requests>=2.28
-spotdl
+spotdl>=4.2.5
 yt-dlp>=2024.10.0
 python-dotenv>=1.0.0
+ffmpeg-python>=0.2.0
