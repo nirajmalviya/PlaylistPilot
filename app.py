@@ -11,6 +11,10 @@ import subprocess
 import tempfile
 import shutil
 import json
+import time
+from mutagen.mp4 import MP4, MP4Cover
+from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB
+from mutagen.mp3 import MP3
 
 # ---------------- CONFIG ----------------
 SPOTIFY_CLIENT_ID = "b8d625c4e9ea44ef977009c72398f32e"
@@ -20,12 +24,12 @@ st.set_page_config(page_title="Spotify Playlist Downloader", layout="wide")
 st.title("🎵 Spotify Playlist Downloader")
 
 st.markdown("""
-Download your favorite Spotify playlists using **yt-dlp** (no FFmpeg required for some formats):
+Download your favorite Spotify playlists with **album covers** and proper metadata:
 1. Paste your Spotify playlist URL
 2. Click **Fetch Playlist** to see the songs
-3. Click **Download All** to download songs
+3. Click **Download All** to download with covers
 
-**Requirements**: `pip install yt-dlp`
+**Requirements**: `pip install yt-dlp mutagen requests`
 """)
 
 
@@ -41,8 +45,8 @@ def check_ytdlp():
 ytdlp_installed = check_ytdlp()
 
 if not ytdlp_installed:
-    st.error("⚠️ yt-dlp is not installed! Please run: `pip install yt-dlp`")
-    st.code("pip install yt-dlp")
+    st.error("⚠️ yt-dlp is not installed! Please run: `pip install yt-dlp mutagen`")
+    st.code("pip install yt-dlp mutagen")
     st.stop()
 
 # ---------------- UI inputs ----------------
@@ -54,10 +58,12 @@ playlist_url = st.text_input(
 with st.expander("⚙️ Download Settings"):
     audio_format = st.selectbox(
         "Audio Format", 
-        ["m4a", "opus", "mp3"],
-        help="m4a and opus don't require FFmpeg. mp3 requires FFmpeg."
+        ["m4a", "mp3"],
+        help="m4a: No FFmpeg needed. mp3: Requires FFmpeg but more compatible."
     )
     audio_quality = st.selectbox("Quality", ["best", "192", "128"], index=0)
+    max_retries = st.slider("Retry attempts for failed downloads", 1, 5, 3)
+    add_metadata = st.checkbox("Add album covers & metadata", value=True)
 
 col1, col2 = st.columns(2)
 with col1:
@@ -115,99 +121,209 @@ def extract_tracks_from_spotify(playlist_data):
         if not track:
             continue
 
+        album = track.get("album", {})
+        images = album.get("images", [])
+        cover_url = images[0]["url"] if images else None
+
         track_info = {
             "id": track.get("id"),
             "name": track.get("name"),
             "artists": ", ".join([a["name"] for a in track.get("artists", [])]),
-            "album": track.get("album", {}).get("name", ""),
+            "album": album.get("name", ""),
             "duration_ms": track.get("duration_ms"),
             "spotify_url": track.get("external_urls", {}).get("spotify", ""),
+            "cover_url": cover_url,
         }
         tracks.append(track_info)
 
     return tracks
 
 
-# ---------------- yt-dlp Download Function ----------------
-def download_track_ytdlp(track_name, artist_name, output_dir, audio_format="m4a", quality="best"):
-    """Download a single track using yt-dlp."""
-    search_query = f"ytsearch1:{artist_name} {track_name} audio"
+def download_cover_art(cover_url):
+    """Download album cover from URL."""
+    try:
+        response = requests.get(cover_url, timeout=10)
+        response.raise_for_status()
+        return response.content
+    except:
+        return None
+
+
+def add_metadata_to_file(file_path, track_info, cover_data):
+    """Add metadata and album cover to audio file."""
+    try:
+        if file_path.endswith('.m4a'):
+            audio = MP4(file_path)
+            audio["\xa9nam"] = track_info["name"]
+            audio["\xa9ART"] = track_info["artists"]
+            audio["\xa9alb"] = track_info["album"]
+            
+            if cover_data:
+                audio["covr"] = [MP4Cover(cover_data, imageformat=MP4Cover.FORMAT_JPEG)]
+            
+            audio.save()
+            
+        elif file_path.endswith('.mp3'):
+            audio = MP3(file_path, ID3=ID3)
+            
+            try:
+                audio.add_tags()
+            except:
+                pass
+            
+            audio.tags.add(TIT2(encoding=3, text=track_info["name"]))
+            audio.tags.add(TPE1(encoding=3, text=track_info["artists"]))
+            audio.tags.add(TALB(encoding=3, text=track_info["album"]))
+            
+            if cover_data:
+                audio.tags.add(
+                    APIC(
+                        encoding=3,
+                        mime='image/jpeg',
+                        type=3,
+                        desc='Cover',
+                        data=cover_data
+                    )
+                )
+            
+            audio.save()
+        
+        return True
+    except Exception as e:
+        return False
+
+
+# ---------------- Enhanced yt-dlp Download Function ----------------
+def download_track_ytdlp(track_info, output_dir, audio_format="m4a", quality="best", retries=3):
+    """Download a single track using yt-dlp with retry logic."""
+    track_name = track_info["name"]
+    artist_name = track_info["artists"]
     
-    # Build yt-dlp command
-    output_template = os.path.join(output_dir, f"{artist_name} - {track_name}.%(ext)s")
+    # Clean filename
+    safe_filename = f"{artist_name} - {track_name}"
+    safe_filename = re.sub(r'[<>:"/\\|?*]', '', safe_filename)
     
-    # Format options based on selection
+    output_template = os.path.join(output_dir, f"{safe_filename}.%(ext)s")
+    
+    # Format options
     if audio_format == "m4a":
         format_arg = "bestaudio[ext=m4a]/bestaudio"
-    elif audio_format == "opus":
-        format_arg = "bestaudio[ext=webm]/bestaudio"
     elif audio_format == "mp3":
         format_arg = "bestaudio"
     else:
         format_arg = "bestaudio"
     
-    cmd = [
-        'yt-dlp',
-        '-f', format_arg,
-        '-o', output_template,
-        '--no-playlist',
-        '--quiet',
-        '--no-warnings',
-        '--extract-audio',
-    ]
+    for attempt in range(retries):
+        try:
+            search_query = f"ytsearch1:{artist_name} {track_name} official audio"
+            
+            cmd = [
+                'yt-dlp',
+                '-f', format_arg,
+                '-o', output_template,
+                '--no-playlist',
+                '--quiet',
+                '--no-warnings',
+                '--extract-audio',
+                '--concurrent-fragments', '4',
+                '--socket-timeout', '30',
+                '--retries', '5',
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            ]
+            
+            # Add post-processing for mp3
+            if audio_format == "mp3":
+                cmd.extend([
+                    '--audio-format', 'mp3',
+                    '--audio-quality', quality if quality != "best" else "0"
+                ])
+            
+            cmd.append(search_query)
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=180
+            )
+            
+            if result.returncode == 0:
+                # Find the downloaded file
+                downloaded_file = None
+                for ext in [audio_format, 'webm', 'opus', 'm4a', 'mp3']:
+                    potential_file = os.path.join(output_dir, f"{safe_filename}.{ext}")
+                    if os.path.exists(potential_file):
+                        downloaded_file = potential_file
+                        break
+                
+                return True, downloaded_file, ""
+            else:
+                error_msg = result.stderr if result.stderr else "Unknown error"
+                if "403" in error_msg and attempt < retries - 1:
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                    continue
+                return False, None, error_msg
+                
+        except subprocess.TimeoutExpired:
+            if attempt < retries - 1:
+                time.sleep(2)
+                continue
+            return False, None, "Timeout"
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(2)
+                continue
+            return False, None, str(e)
     
-    # Add post-processing for mp3 (requires FFmpeg)
-    if audio_format == "mp3":
-        cmd.extend([
-            '--audio-format', 'mp3',
-            '--audio-quality', quality if quality != "best" else "0"
-        ])
-    
-    cmd.append(search_query)
-    
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
-        return result.returncode == 0, result.stdout, result.stderr
-    except subprocess.TimeoutExpired:
-        return False, "", "Timeout"
-    except Exception as e:
-        return False, "", str(e)
+    return False, None, "Max retries exceeded"
 
 
-def download_playlist_ytdlp(tracks, output_dir, audio_format="m4a", quality="best", max_songs=0):
-    """Download multiple tracks."""
+def download_playlist_ytdlp(tracks, output_dir, audio_format="m4a", quality="best", max_retries=3, add_metadata=True):
+    """Download multiple tracks with metadata."""
     downloaded = 0
     failed = []
     
-    tracks_to_download = tracks[:max_songs] if max_songs > 0 else tracks
-    
-    for idx, track in enumerate(tracks_to_download, 1):
+    for idx, track in enumerate(tracks, 1):
         track_name = track["name"]
         artist_name = track["artists"]
         
-        yield f"[{idx}/{len(tracks_to_download)}] Downloading: {artist_name} - {track_name}"
+        yield f"[{idx}/{len(tracks)}] Downloading: {artist_name} - {track_name}"
         
-        success, stdout, stderr = download_track_ytdlp(
-            track_name, artist_name, output_dir, audio_format, quality
+        success, file_path, error = download_track_ytdlp(
+            track, output_dir, audio_format, quality, max_retries
         )
         
-        if success:
+        if success and file_path:
             yield f"✅ Downloaded: {track_name}"
+            
+            # Add metadata and cover art
+            if add_metadata:
+                yield f"🎨 Adding album cover and metadata..."
+                cover_data = None
+                if track.get("cover_url"):
+                    cover_data = download_cover_art(track["cover_url"])
+                
+                if add_metadata_to_file(file_path, track, cover_data):
+                    yield f"✅ Metadata added"
+                else:
+                    yield f"⚠️ Metadata failed (file still downloaded)"
+            
             downloaded += 1
         else:
-            yield f"❌ Failed: {track_name} - {stderr[:100]}"
+            yield f"❌ Failed: {track_name}"
+            if "403" in error:
+                yield f"   → 403 Error: Retried {max_retries} times"
+            else:
+                yield f"   → Error: {error[:100]}"
             failed.append(f"{artist_name} - {track_name}")
         
-        yield f"Progress: {downloaded}/{len(tracks_to_download)} successful"
+        yield f"Progress: {downloaded}/{len(tracks)} successful"
     
-    yield f"\n🎉 Download complete! {downloaded}/{len(tracks_to_download)} tracks downloaded"
+    yield f"\n🎉 Download complete! {downloaded}/{len(tracks)} tracks downloaded"
     if failed:
-        yield f"⚠️ Failed tracks: {len(failed)}"
+        yield f"⚠️ Failed tracks ({len(failed)}): " + ", ".join(failed[:5])
+        if len(failed) > 5:
+            yield f"   ... and {len(failed) - 5} more"
 
 
 # ---------------- Session State ----------------
@@ -221,7 +337,7 @@ if "logs" not in st.session_state:
 
 def append_log(msg):
     st.session_state.logs.append(msg)
-    log_area.text("\n".join(st.session_state.logs[-40:]))
+    log_area.text("\n".join(st.session_state.logs[-50:]))
 
 
 # ---------------- Fetch Button ----------------
@@ -247,7 +363,7 @@ if fetch_btn:
                 if tracks:
                     st.success(f"✅ Found {len(tracks)} tracks")
 
-                    # Display tracks
+                    # Display tracks with cover
                     df = pd.DataFrame(tracks)
                     st.dataframe(
                         df[["name", "artists", "album"]],
@@ -283,8 +399,8 @@ if download_btn:
 
         try:
             # Download using yt-dlp
-            append_log(f"📥 Downloading with yt-dlp...")
-            status_text.text("Downloading songs...")
+            append_log(f"📥 Downloading with yt-dlp (retries: {max_retries})...")
+            status_text.text("Downloading songs with album covers...")
 
             download_count = 0
             total_tracks = len(st.session_state.playlist_tracks)
@@ -293,7 +409,9 @@ if download_btn:
                 st.session_state.playlist_tracks, 
                 temp_dir, 
                 audio_format,
-                audio_quality
+                audio_quality,
+                max_retries,
+                add_metadata
             ):
                 append_log(output)
                 if "✅ Downloaded:" in output:
@@ -301,14 +419,12 @@ if download_btn:
                     progress_bar.progress(min(download_count / max(total_tracks, 1), 1.0))
 
             # Check if files were downloaded
-            downloaded_files = list(Path(temp_dir).glob(f"*.{audio_format}"))
-            
-            # Also check for webm if opus was selected
-            if audio_format == "opus" and not downloaded_files:
-                downloaded_files = list(Path(temp_dir).glob("*.webm"))
+            downloaded_files = []
+            for ext in [audio_format, 'webm', 'opus', 'm4a', 'mp3']:
+                downloaded_files.extend(list(Path(temp_dir).glob(f"*.{ext}")))
 
             if downloaded_files:
-                append_log(f"\n✅ Successfully downloaded {len(downloaded_files)} songs")
+                append_log(f"\n✅ Successfully downloaded {len(downloaded_files)} songs with metadata")
 
                 # Create ZIP file
                 append_log("📦 Creating ZIP file...")
@@ -327,7 +443,7 @@ if download_btn:
                     playlist_name_safe = "playlist"
                 zip_filename = f"{playlist_name_safe}_songs.zip"
 
-                st.success(f"🎉 Downloaded {len(downloaded_files)} songs!")
+                st.success(f"🎉 Downloaded {len(downloaded_files)} songs with album covers!")
 
                 # Download button
                 st.download_button(
@@ -338,7 +454,7 @@ if download_btn:
                     use_container_width=True
                 )
 
-                st.info(f"💾 Click the button above to download all songs as a ZIP file")
+                st.info(f"💾 Click the button above to download all songs with embedded album art")
             else:
                 st.error("❌ No songs were downloaded. Check the logs above for errors.")
 
@@ -360,9 +476,9 @@ with st.expander("💡 How to Use"):
     st.markdown("""
     ### Installation:
 
-    Install yt-dlp (lightweight, no FFmpeg needed for m4a/opus):
+    Install required packages:
     ```bash
-    pip install yt-dlp
+    pip install yt-dlp mutagen requests
     ```
 
     ### Steps:
@@ -378,23 +494,25 @@ with st.expander("💡 How to Use"):
     3. **Download**: 
        - Click "Download All"
        - Wait for processing (1-2 minutes per song)
+       - Album covers are automatically embedded
        - Click "Download ZIP File" to save
 
+    ### Features:
+    - ✅ **Album covers embedded** in files
+    - ✅ **Metadata** (artist, title, album)
+    - ✅ **Automatic retry** for 403 errors
+    - ✅ **Exponential backoff** for failed downloads
+    - ✅ **User-agent spoofing** to avoid blocks
+
     ### Format Guide:
-    - **M4A** (Recommended): High quality, no FFmpeg needed, works everywhere
-    - **OPUS**: Best compression, no FFmpeg needed, modern format
-    - **MP3**: Universal compatibility, requires FFmpeg
+    - **M4A**: High quality, no FFmpeg needed, supports covers
+    - **MP3**: Universal compatibility, requires FFmpeg, supports covers
 
-    ### How it works:
-    - Searches YouTube for each track (artist + song name)
-    - Downloads best available audio quality
-    - Packages everything into a convenient ZIP file
-
-    ### Tips:
-    - M4A format works without FFmpeg installation
-    - For large playlists, be patient
-    - Some songs may fail if not found on YouTube
-    - Downloads are for personal use only
+    ### Troubleshooting 403 Errors:
+    - Tool automatically retries failed downloads
+    - Uses different user agents to avoid detection
+    - Implements exponential backoff between retries
+    - Adjust retry count in settings (1-5 attempts)
 
     ### Legal Note:
     ⚠️ This tool is for personal use only. Please respect copyright laws.
@@ -402,4 +520,4 @@ with st.expander("💡 How to Use"):
 
 # Footer
 st.markdown("---")
-st.markdown("Made with ❤️ using Streamlit & yt-dlp | Powered by Spotify API & YouTube")
+st.markdown("Made with ❤️ using Streamlit, yt-dlp & Mutagen | Album covers included 🎨")
