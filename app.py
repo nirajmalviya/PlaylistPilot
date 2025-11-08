@@ -104,8 +104,8 @@ with st.expander("⚙️ Download Settings"):
     # Provider selection with multiple options
     audio_provider = st.selectbox(
         "Audio Provider (Primary)",
-        ["youtube-music", "youtube", "soundcloud", "bandcamp", "slider-kz"],
-        help="Primary source for downloading. Will automatically try alternatives on failure."
+        ["youtube", "youtube-music", "soundcloud", "bandcamp", "slider-kz"],
+        help="YouTube (not YouTube Music) is most reliable for avoiding 403 errors"
     )
     
     use_fallback = st.checkbox(
@@ -207,7 +207,7 @@ def download_with_spotdl_fallback(playlist_url, output_dir, audio_format="mp3", 
     
     # Add fallback providers if enabled
     if enable_fallback:
-        all_providers = ["youtube-music", "youtube", "soundcloud", "slider-kz", "bandcamp"]
+        all_providers = ["youtube", "youtube-music", "soundcloud", "slider-kz", "bandcamp"]
         providers.extend([p for p in all_providers if p != primary_provider])
     
     for provider_idx, provider in enumerate(providers):
@@ -306,7 +306,7 @@ def download_individual_tracks_with_fallback(tracks, output_dir, audio_format="m
     """
     providers = [primary_provider]
     if enable_fallback:
-        all_providers = ["youtube-music", "youtube", "soundcloud", "slider-kz", "bandcamp"]
+        all_providers = ["youtube", "youtube-music", "soundcloud", "slider-kz", "bandcamp"]
         providers.extend([p for p in all_providers if p != primary_provider])
     
     successful_downloads = []
@@ -466,7 +466,10 @@ if download_btn:
             
             status_text.text("Downloading songs with fallback support...")
 
+            # First try: Bulk download
             download_count = 0
+            bulk_success = False
+            
             for output in download_with_spotdl_fallback(
                 playlist_url, temp_dir, audio_format, audio_quality, 
                 ffmpeg_path=ffmpeg_exe, primary_provider=audio_provider, 
@@ -480,6 +483,31 @@ if download_btn:
                     progress_bar.progress(progress)
 
             downloaded_files = list(Path(temp_dir).glob(f"*.{audio_format}"))
+            
+            # Second try: If bulk download failed, try individual tracks
+            if not downloaded_files and st.session_state.playlist_tracks:
+                append_log("\n⚠️ Bulk download failed. Switching to individual track download mode...")
+                append_log("This may take longer but has higher success rate.\n")
+                status_text.text("Downloading tracks individually...")
+                
+                tracks_to_download = st.session_state.playlist_tracks
+                if max_songs > 0:
+                    tracks_to_download = tracks_to_download[:max_songs]
+                
+                download_count = 0
+                for output in download_individual_tracks_with_fallback(
+                    tracks_to_download, temp_dir, audio_format, audio_quality,
+                    ffmpeg_path=ffmpeg_exe, primary_provider=audio_provider,
+                    enable_fallback=use_fallback, embed_metadata=embed_metadata,
+                    use_cookies=use_cookies
+                ):
+                    append_log(output)
+                    if "Downloaded successfully" in output:
+                        download_count += 1
+                        progress = min(download_count / len(tracks_to_download), 1.0)
+                        progress_bar.progress(progress)
+                
+                downloaded_files = list(Path(temp_dir).glob(f"*.{audio_format}"))
 
             if downloaded_files:
                 append_log(f"\n✅ Successfully downloaded {len(downloaded_files)} songs")
@@ -511,8 +539,44 @@ if download_btn:
 
                 st.info(f"💾 Click the button above to download all songs as a ZIP file")
             else:
-                st.error("❌ No songs were downloaded. Check the logs above for errors.")
-                st.info("💡 Try enabling fallback mode or selecting a different primary provider")
+                st.error("❌ No songs were downloaded. Please try the following:")
+                
+                with st.expander("🔧 Troubleshooting Steps", expanded=True):
+                    st.markdown("""
+                    ### Try these fixes:
+                    
+                    1. **Change Provider to YouTube (not YouTube Music)**
+                       - YouTube Music often blocks requests
+                       - Regular YouTube is more reliable
+                    
+                    2. **Enable Browser Cookies**
+                       - Export cookies from YouTube (see instructions below)
+                       - Save as `cookies.txt` in app folder
+                       - Enable "Use Browser Cookies" option
+                    
+                    3. **Check SpotDL Installation**
+                       ```bash
+                       pip install spotdl --upgrade
+                       pip install yt-dlp --upgrade
+                       ```
+                    
+                    4. **Test with a smaller playlist**
+                       - Try with just 1-2 songs first
+                       - Some playlists may have region-restricted songs
+                    
+                    5. **Check Internet Connection**
+                       - Make sure you can access YouTube
+                       - Try disabling VPN if using one
+                    
+                    ### How to export cookies:
+                    1. Install browser extension: "Get cookies.txt LOCALLY"
+                    2. Visit youtube.com and login
+                    3. Click extension icon → Export
+                    4. Save as `cookies.txt`
+                    5. Place in same folder as this app
+                    """)
+                
+                st.warning("Check the logs above for specific error messages.")
 
         except Exception as e:
             st.error(f"❌ Error during download: {e}")
