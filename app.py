@@ -104,26 +104,14 @@ with st.expander("⚙️ Download Settings"):
     # Provider selection with multiple options
     audio_provider = st.selectbox(
         "Audio Provider (Primary)",
-        ["youtube", "youtube-music", "soundcloud", "bandcamp", "slider-kz"],
-        help="YouTube (not YouTube Music) is most reliable for avoiding 403 errors"
+        ["youtube-music", "youtube", "soundcloud", "bandcamp", "slider-kz"],
+        help="Primary source for downloading. Will automatically try alternatives on failure."
     )
     
     use_fallback = st.checkbox(
         "Enable Automatic Fallback", 
         value=True,
         help="Automatically try alternative sources when primary fails"
-    )
-    
-    embed_metadata = st.checkbox(
-        "Embed Album Covers & Metadata",
-        value=True,
-        help="Add album artwork and complete metadata to downloaded songs"
-    )
-    
-    use_cookies = st.checkbox(
-        "Use Browser Cookies (Fix 403 errors)",
-        value=False,
-        help="Uses your browser cookies to bypass 403 errors. Requires cookies.txt file."
     )
     
     max_songs = st.number_input("Maximum songs to download (0 = all)", 0, 100, 0)
@@ -198,8 +186,7 @@ def extract_tracks_from_spotify(playlist_data):
 
 # ---------------- Enhanced SpotDL Download Function ----------------
 def download_with_spotdl_fallback(playlist_url, output_dir, audio_format="mp3", bitrate="320k", 
-                                   ffmpeg_path=None, primary_provider="youtube-music", enable_fallback=True,
-                                   embed_metadata=True, use_cookies=False):
+                                   ffmpeg_path=None, primary_provider="youtube-music", enable_fallback=True):
     """
     Download playlist using spotdl with automatic fallback to alternative providers.
     """
@@ -207,7 +194,7 @@ def download_with_spotdl_fallback(playlist_url, output_dir, audio_format="mp3", 
     
     # Add fallback providers if enabled
     if enable_fallback:
-        all_providers = ["youtube", "youtube-music", "soundcloud", "slider-kz", "bandcamp"]
+        all_providers = ["youtube-music", "youtube", "soundcloud", "slider-kz", "bandcamp"]
         providers.extend([p for p in all_providers if p != primary_provider])
     
     for provider_idx, provider in enumerate(providers):
@@ -228,27 +215,6 @@ def download_with_spotdl_fallback(playlist_url, output_dir, audio_format="mp3", 
 
             if ffmpeg_path:
                 cmd.extend(["--ffmpeg", ffmpeg_path])
-            
-            # Add metadata embedding options
-            if embed_metadata:
-                cmd.extend([
-                    "--generate-lrc", "False",
-                    "--overwrite", "skip",
-                ])
-            
-            # Add cookie support to bypass 403 errors
-            if use_cookies:
-                cookies_path = os.path.join(os.getcwd(), "cookies.txt")
-                if os.path.exists(cookies_path):
-                    cmd.extend(["--cookie-file", cookies_path])
-                    yield f"🍪 Using cookies from: {cookies_path}"
-                else:
-                    yield f"⚠️ cookies.txt not found, proceeding without cookies"
-            
-            # Add retry and timeout options for 403 errors
-            cmd.extend([
-                "--threads", "1",  # Single thread to avoid rate limiting
-            ])
 
             process = subprocess.Popen(
                 cmd,
@@ -299,14 +265,13 @@ def download_with_spotdl_fallback(playlist_url, output_dir, audio_format="mp3", 
 
 
 def download_individual_tracks_with_fallback(tracks, output_dir, audio_format="mp3", bitrate="320k",
-                                              ffmpeg_path=None, primary_provider="youtube-music", enable_fallback=True,
-                                              embed_metadata=True, use_cookies=False):
+                                              ffmpeg_path=None, primary_provider="youtube-music", enable_fallback=True):
     """
     Download tracks individually with fallback support for failed tracks.
     """
     providers = [primary_provider]
     if enable_fallback:
-        all_providers = ["youtube", "youtube-music", "soundcloud", "slider-kz", "bandcamp"]
+        all_providers = ["youtube-music", "youtube", "soundcloud", "slider-kz", "bandcamp"]
         providers.extend([p for p in all_providers if p != primary_provider])
     
     successful_downloads = []
@@ -334,22 +299,10 @@ def download_individual_tracks_with_fallback(tracks, output_dir, audio_format="m
                     "--bitrate", bitrate,
                     "--audio-provider", provider,
                     "--print-errors",
-                    "--threads", "1",
                 ]
 
                 if ffmpeg_path:
                     cmd.extend(["--ffmpeg", ffmpeg_path])
-                
-                if embed_metadata:
-                    cmd.extend([
-                        "--generate-lrc", "False",
-                        "--overwrite", "skip",
-                    ])
-                
-                if use_cookies:
-                    cookies_path = os.path.join(os.getcwd(), "cookies.txt")
-                    if os.path.exists(cookies_path):
-                        cmd.extend(["--cookie-file", cookies_path])
 
                 process = subprocess.run(
                     cmd,
@@ -376,9 +329,6 @@ def download_individual_tracks_with_fallback(tracks, output_dir, audio_format="m
         if not downloaded:
             yield f"❌ Failed to download: {track_name}"
             failed_tracks.append(track_name)
-        
-        # Small delay between tracks to avoid rate limiting
-        time.sleep(1)
     
     yield f"\n{'='*60}"
     yield f"📊 DOWNLOAD SUMMARY"
@@ -466,15 +416,11 @@ if download_btn:
             
             status_text.text("Downloading songs with fallback support...")
 
-            # First try: Bulk download
             download_count = 0
-            bulk_success = False
-            
             for output in download_with_spotdl_fallback(
                 playlist_url, temp_dir, audio_format, audio_quality, 
                 ffmpeg_path=ffmpeg_exe, primary_provider=audio_provider, 
-                enable_fallback=use_fallback, embed_metadata=embed_metadata,
-                use_cookies=use_cookies
+                enable_fallback=use_fallback
             ):
                 append_log(output)
                 if "Downloaded" in output or "has been downloaded" in output:
@@ -483,31 +429,6 @@ if download_btn:
                     progress_bar.progress(progress)
 
             downloaded_files = list(Path(temp_dir).glob(f"*.{audio_format}"))
-            
-            # Second try: If bulk download failed, try individual tracks
-            if not downloaded_files and st.session_state.playlist_tracks:
-                append_log("\n⚠️ Bulk download failed. Switching to individual track download mode...")
-                append_log("This may take longer but has higher success rate.\n")
-                status_text.text("Downloading tracks individually...")
-                
-                tracks_to_download = st.session_state.playlist_tracks
-                if max_songs > 0:
-                    tracks_to_download = tracks_to_download[:max_songs]
-                
-                download_count = 0
-                for output in download_individual_tracks_with_fallback(
-                    tracks_to_download, temp_dir, audio_format, audio_quality,
-                    ffmpeg_path=ffmpeg_exe, primary_provider=audio_provider,
-                    enable_fallback=use_fallback, embed_metadata=embed_metadata,
-                    use_cookies=use_cookies
-                ):
-                    append_log(output)
-                    if "Downloaded successfully" in output:
-                        download_count += 1
-                        progress = min(download_count / len(tracks_to_download), 1.0)
-                        progress_bar.progress(progress)
-                
-                downloaded_files = list(Path(temp_dir).glob(f"*.{audio_format}"))
 
             if downloaded_files:
                 append_log(f"\n✅ Successfully downloaded {len(downloaded_files)} songs")
@@ -539,44 +460,8 @@ if download_btn:
 
                 st.info(f"💾 Click the button above to download all songs as a ZIP file")
             else:
-                st.error("❌ No songs were downloaded. Please try the following:")
-                
-                with st.expander("🔧 Troubleshooting Steps", expanded=True):
-                    st.markdown("""
-                    ### Try these fixes:
-                    
-                    1. **Change Provider to YouTube (not YouTube Music)**
-                       - YouTube Music often blocks requests
-                       - Regular YouTube is more reliable
-                    
-                    2. **Enable Browser Cookies**
-                       - Export cookies from YouTube (see instructions below)
-                       - Save as `cookies.txt` in app folder
-                       - Enable "Use Browser Cookies" option
-                    
-                    3. **Check SpotDL Installation**
-                       ```bash
-                       pip install spotdl --upgrade
-                       pip install yt-dlp --upgrade
-                       ```
-                    
-                    4. **Test with a smaller playlist**
-                       - Try with just 1-2 songs first
-                       - Some playlists may have region-restricted songs
-                    
-                    5. **Check Internet Connection**
-                       - Make sure you can access YouTube
-                       - Try disabling VPN if using one
-                    
-                    ### How to export cookies:
-                    1. Install browser extension: "Get cookies.txt LOCALLY"
-                    2. Visit youtube.com and login
-                    3. Click extension icon → Export
-                    4. Save as `cookies.txt`
-                    5. Place in same folder as this app
-                    """)
-                
-                st.warning("Check the logs above for specific error messages.")
+                st.error("❌ No songs were downloaded. Check the logs above for errors.")
+                st.info("💡 Try enabling fallback mode or selecting a different primary provider")
 
         except Exception as e:
             st.error(f"❌ Error during download: {e}")
@@ -599,79 +484,40 @@ with st.expander("💡 How to Use"):
     pip install spotdl
     ```
 
-    ### Fixing 403 Errors:
-
-    **Method 1: Use Browser Cookies (Recommended)**
-    1. Install a browser extension to export cookies:
-       - Chrome/Edge: "[Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)"
-       - Firefox: "[cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/)"
-    2. Visit YouTube Music and log in
-    3. Export cookies to `cookies.txt` file
-    4. Place `cookies.txt` in the same folder as this app
-    5. Enable "Use Browser Cookies" option above
-    
-    **Method 2: Try Different Providers**
-    - YouTube Music often has 403 errors
-    - Try "YouTube" or "SoundCloud" as primary provider
-    - Enable automatic fallback for best results
-
-    ### Fixing Missing Album Covers:
-
-    **The app now automatically:**
-    - ✅ Downloads album artwork from Spotify
-    - ✅ Embeds covers into MP3/M4A files
-    - ✅ Adds complete metadata (artist, album, year, etc.)
-    
-    **Make sure "Embed Album Covers & Metadata" is enabled** ☑️
-
     ### Features:
 
-    **🔄 Automatic Fallback**: When one provider fails, tries:
+    **🔄 Automatic Fallback**: When YouTube Music fails, the app automatically tries:
     - YouTube (regular)
     - SoundCloud
     - Bandcamp
     - Slider.kz
+    
+    This ensures maximum success rate for your downloads!
 
     ### Steps:
 
     1. **Get Playlist URL**: Copy your Spotify playlist link
-    2. **Configure Settings**: 
-       - Choose format and bitrate
-       - Select primary provider
-       - Enable fallback mode ✅
-       - Enable metadata embedding ✅
-       - Enable cookies if needed ✅
-    3. **Download**: Click "Download All" and wait
-    4. **Get ZIP**: Download the ZIP file with all songs
+    2. **Configure Settings**: Choose format, bitrate, and primary provider
+    3. **Enable Fallback**: Keep this checked for best results
+    4. **Download**: Click "Download All" and wait
+    5. **Get ZIP**: Download the ZIP file with all songs
 
     ### Provider Recommendations:
-    - **YouTube**: Most reliable, best for avoiding 403 errors
-    - **YouTube Music**: High quality but may have 403 errors
-    - **SoundCloud**: Good for indie/electronic music
+    - **YouTube Music**: Best for most songs (default)
+    - **YouTube**: Good fallback, larger library
+    - **SoundCloud**: Indie/underground music
     - **Bandcamp**: Independent artists
     - **Slider.kz**: Alternative source
 
     ### Troubleshooting:
-
-    **403 Forbidden Errors:**
-    - Use browser cookies (see Method 1 above)
-    - Switch to regular "YouTube" provider
-    - Enable automatic fallback
-    - Wait a few minutes if rate-limited
-
-    **Missing Album Covers:**
-    - Ensure "Embed Album Covers & Metadata" is enabled
-    - Some songs may not have covers in Spotify database
-    - MP3 and M4A formats work best for metadata
-
-    **Slow Downloads:**
-    - Downloads run one at a time to avoid rate limits
-    - Large playlists take time - be patient
-    - Each song typically takes 30-60 seconds
+    - If downloads fail, try a different primary provider
+    - Enable fallback mode for problematic playlists
+    - Check logs for specific error messages
+    - Some songs may be unavailable on all platforms
 
     ### Legal Note:
     ⚠️ For personal use only. Respect copyright laws and terms of service.
     """)
 
 st.markdown("---")
-st.markdown("Made with ❤️ using Streamlit & SpotDL | Multi-provider fallback + metadata embedding")
+st.markdown("Made with ❤️ using Streamlit & SpotDL | Multi-provider fallback system")
