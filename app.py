@@ -28,8 +28,6 @@ Download your favorite Spotify playlists with **album covers** from multiple sou
 1. Paste your Spotify playlist URL
 2. Click **Fetch Playlist** to see the songs
 3. Click **Download All** - automatically tries YouTube, Soundcloud, and more!
-
-**Requirements**: `pip install yt-dlp mutagen requests`
 """)
 
 
