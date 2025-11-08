@@ -40,8 +40,6 @@ Download your favorite Spotify playlists:
 1. Paste your Spotify playlist URL
 2. Click **Fetch Playlist** to see the songs
 3. Click **Download All** to download songs to your device
-
-**Requirements**: Make sure `spotdl` is installed: `pip install spotdl`
 """)
 
 # ---------------- ffmpeg & spotdl helpers ----------------
