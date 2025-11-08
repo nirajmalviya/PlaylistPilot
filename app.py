@@ -13,7 +13,6 @@ import tempfile
 import shutil
 from dotenv import load_dotenv
 import sys
-import json
 
 # Added imports
 import shutil as _shutil
@@ -50,16 +49,25 @@ def ensure_ffmpeg():
     """
     Ensure an ffmpeg binary is available.
     Returns path to ffmpeg executable or None.
+    Strategy:
+      1) check system PATH via shutil.which
+      2) fallback to imageio-ffmpeg.get_ffmpeg_exe() if available
     """
     ff = _shutil.which("ffmpeg")
     if ff:
         return ff
 
+    # fallback to imageio-ffmpeg (downloads a binary into cache)
     if iio_ffmpeg is not None:
         try:
             ff_exe = iio_ffmpeg.get_ffmpeg_exe()
             ff_dir = os.path.dirname(ff_exe)
+            # Prepend to PATH so other checks find it
             os.environ["PATH"] = ff_dir + os.pathsep + os.environ.get("PATH", "")
+            # confirm which now
+            if _shutil.which("ffmpeg") is None:
+                # If which still returns None, use explicit path
+                return ff_exe
             return _shutil.which("ffmpeg") or ff_exe
         except Exception as e:
             print("imageio-ffmpeg failed:", e)
@@ -69,6 +77,7 @@ def ensure_ffmpeg():
 
 def is_spotdl_available():
     """Return True if spotdl module/CLI is available."""
+    # prefer python -m spotdl check to avoid reliance on shell PATH
     try:
         proc = subprocess.run([sys.executable, "-m", "spotdl", "--version"],
                               capture_output=True, text=True, timeout=6)
@@ -97,12 +106,8 @@ playlist_url = st.text_input(
 
 with st.expander("⚙️ Download Settings"):
     audio_format = st.selectbox("Audio Format", ["mp3", "m4a", "flac", "opus", "ogg"])
-    audio_quality = st.selectbox("Bitrate", ["320k", "256k", "192k", "128k"], index=1)  # Default to 256k to avoid rate limits
+    audio_quality = st.selectbox("Bitrate", ["320k", "256k", "192k", "128k"], index=0)  # Default to 320k
     max_songs = st.number_input("Maximum songs to download (0 = all)", 0, 100, 0)
-    # Add retry and delay options
-    st.markdown("**Rate Limit Protection:**")
-    retry_attempts = st.slider("Retry attempts per song", 1, 5, 3)
-    delay_between = st.slider("Delay between downloads (seconds)", 0, 10, 2)
 
 col1, col2 = st.columns(2)
 with col1:
@@ -172,13 +177,11 @@ def extract_tracks_from_spotify(playlist_data):
     return tracks
 
 
-# ---------------- Enhanced SpotDL Download Function ----------------
-def download_with_spotdl_enhanced(playlist_url, output_dir, audio_format="mp3", bitrate="256k", 
-                                  ffmpeg_path=None, retry_attempts=3, delay=2):
-    """
-    Enhanced download with better error handling and rate limit protection.
-    """
+# ---------------- SpotDL Download Function ----------------
+def download_with_spotdl(playlist_url, output_dir, audio_format="mp3", bitrate="320k", ffmpeg_path=None):
+    """Download playlist using spotdl command called as a Python module."""
     try:
+        # Use python -m spotdl to avoid shell PATH issues and pass explicit ffmpeg path
         cmd = [
             sys.executable, "-m", "spotdl",
             playlist_url,
@@ -186,16 +189,10 @@ def download_with_spotdl_enhanced(playlist_url, output_dir, audio_format="mp3", 
             "--format", audio_format,
             "--bitrate", bitrate,
             "--print-errors",
-            "--threads", "1",  # Single thread to avoid overwhelming YT
-            "--sponsor-block",  # Skip sponsored segments
         ]
 
         if ffmpeg_path:
             cmd.extend(["--ffmpeg", ffmpeg_path])
-
-        # Add retry logic via spotdl options
-        if retry_attempts > 1:
-            cmd.extend(["--download-ffmpeg"])
 
         process = subprocess.Popen(
             cmd,
@@ -207,36 +204,18 @@ def download_with_spotdl_enhanced(playlist_url, output_dir, audio_format="mp3", 
         )
 
         output_lines = []
-        error_count = 0
-        success_count = 0
-        
         for line in process.stdout:
             line = line.strip()
             if line:
                 output_lines.append(line)
-                
-                # Track errors and successes
-                if "AudioProviderError" in line or "ERROR" in line:
-                    error_count += 1
-                    yield f"⚠️ Error: {line}"
-                elif "Downloaded" in line or "has been downloaded" in line:
-                    success_count += 1
-                    yield f"✅ {line}"
-                elif "WARNING" in line and "rate/request limit" in line:
-                    yield f"⏸️ Rate limited - waiting..."
-                    time.sleep(delay)
-                else:
-                    yield line
+                yield line
 
         process.wait()
-        
-        # Final summary
-        yield f"\n📊 Summary: {success_count} succeeded, {error_count} failed"
-        return process.returncode == 0, success_count, error_count
+        return process.returncode == 0
 
     except Exception as e:
-        yield f"❌ Critical Error: {str(e)}"
-        return False, 0, 0
+        yield f"Error: {str(e)}"
+        return False
 
 
 # ---------------- Session State ----------------
@@ -250,7 +229,7 @@ if "logs" not in st.session_state:
 
 def append_log(msg):
     st.session_state.logs.append(msg)
-    log_area.text("\n".join(st.session_state.logs[-50:]))  # Show more logs
+    log_area.text("\n".join(st.session_state.logs[-30:]))
 
 # ---------------- Fetch Button ----------------
 if fetch_btn:
@@ -290,7 +269,7 @@ if fetch_btn:
 
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 401:
-                st.error("❌ Authentication error. Please check your Spotify credentials.")
+                st.error("❌ Authentication error. Please contact support.")
             else:
                 st.error(f"❌ Spotify API Error: {e}")
         except Exception as e:
@@ -303,63 +282,42 @@ if download_btn:
     else:
         st.session_state.logs = []
         append_log("🚀 Starting download process...")
-        append_log(f"⚙️ Settings: {audio_format.upper()} @ {audio_quality}, {retry_attempts} retries, {delay_between}s delay")
 
         # Create temporary directory for downloads
         temp_dir = tempfile.mkdtemp()
 
         try:
-            # Download using enhanced spotdl
-            append_log(f"📥 Downloading with SpotDL (this may take a while)...")
-            status_text.text("Downloading songs... Please be patient")
+            # Download using spotdl
+            append_log(f"📥 Downloading with SpotDL...")
+            status_text.text("Downloading songs...")
 
-            success_count = 0
-            error_count = 0
-            
-            result = download_with_spotdl_enhanced(
-                playlist_url, 
-                temp_dir, 
-                audio_format, 
-                audio_quality, 
-                ffmpeg_path=ffmpeg_exe,
-                retry_attempts=retry_attempts,
-                delay=delay_between
-            )
-            
-            for output in result:
-                if isinstance(output, tuple):
-                    # Final result
-                    _, success_count, error_count = output
-                else:
-                    append_log(output)
-                    if "✅" in output:
-                        success_count += 1
-                        total_tracks = len(st.session_state.playlist_tracks) or 1
-                        progress_bar.progress(min(success_count / total_tracks, 1.0))
+            download_count = 0
+            for output in download_with_spotdl(playlist_url, temp_dir, audio_format, audio_quality, ffmpeg_path=ffmpeg_exe):
+                append_log(output)
+                # SpotDL output may vary, adjust matching if needed
+                if "Downloaded" in output or "has been downloaded" in output:
+                    download_count += 1
+                    progress_bar.progress(min(download_count / max(len(st.session_state.playlist_tracks), 1), 1.0))
 
             # Check if files were downloaded
             downloaded_files = list(Path(temp_dir).glob(f"*.{audio_format}"))
 
             if downloaded_files:
                 append_log(f"\n✅ Successfully downloaded {len(downloaded_files)} songs")
-                
-                if error_count > 0:
-                    st.warning(f"⚠️ {error_count} songs failed to download. This can happen due to:\n"
-                              f"- Rate limiting from YouTube\n"
-                              f"- Songs not available on YouTube Music\n"
-                              f"- Regional restrictions\n\n"
-                              f"Try downloading again later or in smaller batches.")
 
-                # Create ZIP file
-                append_log("📦 Creating ZIP file...")
+                # Create ZIP file with minimal compression for speed
+                append_log("📦 Creating ZIP file (fast mode)...")
                 status_text.text("Creating ZIP file...")
                 
                 zip_buffer = BytesIO()
 
+                # Use ZIP_STORED (no compression) for maximum speed
+                # Audio files are already compressed, so ZIP compression adds minimal benefit
                 with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_STORED) as zip_file:
                     for i, file_path in enumerate(downloaded_files):
                         zip_file.write(file_path, file_path.name)
-                        if i % 5 == 0:
+                        # Update progress during ZIP creation
+                        if i % 5 == 0:  # Update every 5 files to avoid too many updates
                             progress_bar.progress(min(0.8 + (0.2 * i / len(downloaded_files)), 1.0))
 
                 zip_buffer.seek(0)
@@ -384,15 +342,7 @@ if download_btn:
 
                 st.info(f"💾 Click the button above to download all songs as a ZIP file")
             else:
-                st.error("❌ No songs were downloaded. Possible reasons:\n"
-                        "- All songs failed due to rate limiting\n"
-                        "- Songs not available on YouTube Music\n"
-                        "- Network issues\n\n"
-                        "**Suggestions:**\n"
-                        "1. Try again in a few minutes (rate limits reset)\n"
-                        "2. Download in smaller batches\n"
-                        "3. Use lower bitrate (128k or 192k)\n"
-                        "4. Check the logs above for specific errors")
+                st.error("❌ No songs were downloaded. Check the logs above for errors.")
 
         except Exception as e:
             st.error(f"❌ Error during download: {e}")
@@ -434,20 +384,12 @@ with st.expander("💡 How to Use"):
        - Click "Download ZIP File" to save to your device
        - Extract the ZIP file to access your songs
 
-    ### Troubleshooting Rate Limits:
-
-    If you see "AudioProviderError" or rate limit warnings:
-    - **Wait 10-15 minutes** before trying again
-    - **Download in smaller batches** (use max songs limit)
-    - **Use lower bitrate** (192k or 128k instead of 320k)
-    - **Increase delay between downloads** (5-10 seconds)
-
     ### Tips:
-    - SpotDL downloads from YouTube Music (requires internet)
+    - SpotDL downloads high-quality audio from YouTube Music
     - Songs include proper metadata (artist, album, cover art)
-    - Default bitrate is 256k (good balance of quality and speed)
-    - For large playlists (20+ songs), expect some failures due to rate limiting
-    - Download during off-peak hours for better success rates
+    - Download speed depends on your internet connection
+    - For large playlists, be patient - quality takes time! 
+    - Default bitrate is 320k (highest quality MP3)
 
     ### Formats Available:
     - **MP3**: Best compatibility (recommended)
