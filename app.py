@@ -89,10 +89,7 @@ def is_spotdl_available():
 ffmpeg_exe = ensure_ffmpeg()
 spotdl_installed = is_spotdl_available()
 
-# Better diagnostics in app logs
-st.write("Debug: ffmpeg path ->", ffmpeg_exe)
-st.write("Debug: spotdl available ->", spotdl_installed)
-
+# Check requirements silently
 if not spotdl_installed:
     st.error("⚠️ SpotDL is not installed! Please add `spotdl` to requirements.txt (e.g. `spotdl>=4.2.5`) and redeploy.")
     st.stop()
@@ -210,14 +207,36 @@ def download_with_spotdl(playlist_url, output_dir, audio_format="mp3", bitrate="
         for line in process.stdout:
             line = line.strip()
             if line:
-                output_lines.append(line)
-                yield line
+                # Filter out unwanted log messages
+                if any(skip in line for skip in [
+                    "WARNING:root:",
+                    "INFO:spotdl",
+                    "INFO:root:",
+                    "DEBUG:",
+                    "rate/request limit"
+                ]):
+                    continue
+                
+                # Only show important messages
+                if "Found" in line and "songs" in line:
+                    yield f"✅ {line}"
+                elif "Downloaded" in line and "https://" in line:
+                    # Clean up download message
+                    if ":" in line:
+                        song_name = line.split('"')[1] if '"' in line else line.split(":")[0]
+                        yield f"✓ {song_name}"
+                elif "Processing query" in line:
+                    yield "🔍 Processing playlist..."
+                elif line and not line.startswith("INFO") and not line.startswith("WARNING"):
+                    output_lines.append(line)
+                    if len(line) > 5:  # Only show substantial messages
+                        yield line
 
         process.wait()
         return process.returncode == 0
 
     except Exception as e:
-        yield f"Error: {str(e)}"
+        yield f"❌ Error: {str(e)}"
         return False
 
 
@@ -231,8 +250,10 @@ if "logs" not in st.session_state:
 
 
 def append_log(msg):
+    """Add log message and display only the last 20 lines."""
     st.session_state.logs.append(msg)
-    log_area.text("\n".join(st.session_state.logs[-30:]))
+    # Show only recent logs to keep UI clean
+    log_area.text("\n".join(st.session_state.logs[-20:]))
 
 # ---------------- Fetch Button ----------------
 if fetch_btn:
@@ -295,12 +316,14 @@ if download_btn:
             status_text.text("Downloading songs...")
 
             download_count = 0
+            total_tracks = len(st.session_state.playlist_tracks) if st.session_state.playlist_tracks else 10
+            
             for output in download_with_spotdl(playlist_url, temp_dir, audio_format, audio_quality, ffmpeg_path=ffmpeg_exe):
                 append_log(output)
-                # SpotDL output may vary, adjust matching if needed
-                if "Downloaded" in output or "has been downloaded" in output:
+                # Count successful downloads
+                if "✓" in output or "Downloaded" in output:
                     download_count += 1
-                    progress_bar.progress(min(download_count / max(len(st.session_state.playlist_tracks), 1), 1.0))
+                    progress_bar.progress(min(download_count / total_tracks, 0.95))
 
             # Check if files were downloaded
             downloaded_files = list(Path(temp_dir).glob(f"*.{audio_format}"))
