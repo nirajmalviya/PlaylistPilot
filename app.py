@@ -109,7 +109,7 @@ playlist_url = st.text_input(
 
 with st.expander("⚙️ Download Settings"):
     audio_format = st.selectbox("Audio Format", ["mp3", "m4a", "flac", "opus", "ogg"])
-    audio_quality = st.selectbox("Bitrate", ["128k", "192k", "256k", "320k"])
+    audio_quality = st.selectbox("Bitrate", ["320k", "256k", "192k", "128k"], index=0)  # Default to 320k
     max_songs = st.number_input("Maximum songs to download (0 = all)", 0, 100, 0)
 
 col1, col2 = st.columns(2)
@@ -308,13 +308,20 @@ if download_btn:
             if downloaded_files:
                 append_log(f"\n✅ Successfully downloaded {len(downloaded_files)} songs")
 
-                # Create ZIP file
-                append_log("📦 Creating ZIP file...")
+                # Create ZIP file with minimal compression for speed
+                append_log("📦 Creating ZIP file (fast mode)...")
+                status_text.text("Creating ZIP file...")
+                
                 zip_buffer = BytesIO()
 
-                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                    for file_path in downloaded_files:
+                # Use ZIP_STORED (no compression) for maximum speed
+                # Audio files are already compressed, so ZIP compression adds minimal benefit
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_STORED) as zip_file:
+                    for i, file_path in enumerate(downloaded_files):
                         zip_file.write(file_path, file_path.name)
+                        # Update progress during ZIP creation
+                        if i % 5 == 0:  # Update every 5 files to avoid too many updates
+                            progress_bar.progress(min(0.8 + (0.2 * i / len(downloaded_files)), 1.0))
 
                 zip_buffer.seek(0)
 
@@ -385,6 +392,7 @@ with st.expander("💡 How to Use"):
     - Songs include proper metadata (artist, album, cover art)
     - Download speed depends on your internet connection
     - For large playlists, be patient - quality takes time! 
+    - Default bitrate is 320k (highest quality MP3)
 
     ### Formats Available:
     - **MP3**: Best compatibility (recommended)
