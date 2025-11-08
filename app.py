@@ -12,15 +12,23 @@ import subprocess
 import tempfile
 import shutil
 from dotenv import load_dotenv
+import sys
+
+# Added imports
+import shutil as _shutil
+try:
+    import imageio_ffmpeg as iio_ffmpeg
+except Exception:
+    iio_ffmpeg = None
+
 # ---------------- CONFIG ----------------
-# Hardcoded Spotify API credentials
 load_dotenv()
 
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 
 if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
-    st.error("⚠️ Spotify credentials not found! Please set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET in .env or Render environment.")
+    st.error("⚠️ Spotify credentials not found! Please set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET in .env or Streamlit environment.")
     st.stop()
 # ----------------------------------------
 
@@ -36,20 +44,61 @@ Download your favorite Spotify playlists:
 **Requirements**: Make sure `spotdl` is installed: `pip install spotdl`
 """)
 
+# ---------------- ffmpeg & spotdl helpers ----------------
+def ensure_ffmpeg():
+    """
+    Ensure an ffmpeg binary is available.
+    Returns path to ffmpeg executable or None.
+    Strategy:
+      1) check system PATH via shutil.which
+      2) fallback to imageio-ffmpeg.get_ffmpeg_exe() if available
+    """
+    ff = _shutil.which("ffmpeg")
+    if ff:
+        return ff
 
-# Check if spotdl is installed
-def check_spotdl():
+    # fallback to imageio-ffmpeg (downloads a binary into cache)
+    if iio_ffmpeg is not None:
+        try:
+            ff_exe = iio_ffmpeg.get_ffmpeg_exe()
+            ff_dir = os.path.dirname(ff_exe)
+            # Prepend to PATH so other checks find it
+            os.environ["PATH"] = ff_dir + os.pathsep + os.environ.get("PATH", "")
+            # confirm which now
+            if _shutil.which("ffmpeg") is None:
+                # If which still returns None, use explicit path
+                return ff_exe
+            return _shutil.which("ffmpeg") or ff_exe
+        except Exception as e:
+            print("imageio-ffmpeg failed:", e)
+            return None
+    return None
+
+
+def is_spotdl_available():
+    """Return True if spotdl module/CLI is available."""
+    # prefer python -m spotdl check to avoid reliance on shell PATH
     try:
-        result = subprocess.run(['spotdl', '--version'], capture_output=True, text=True, timeout=5)
-        return result.returncode == 0
-    except:
+        proc = subprocess.run([sys.executable, "-m", "spotdl", "--version"],
+                              capture_output=True, text=True, timeout=6)
+        return proc.returncode == 0
+    except Exception:
         return False
 
 
-spotdl_installed = check_spotdl()
+ffmpeg_exe = ensure_ffmpeg()
+spotdl_installed = is_spotdl_available()
+
+# Better diagnostics in app logs
+st.write("Debug: ffmpeg path ->", ffmpeg_exe)
+st.write("Debug: spotdl available ->", spotdl_installed)
 
 if not spotdl_installed:
-    st.error("⚠️ SpotDL is not installed! Please run: `pip install spotdl`")
+    st.error("⚠️ SpotDL is not installed! Please add `spotdl` to requirements.txt (e.g. `spotdl>=4.2.5`) and redeploy.")
+    st.stop()
+
+if not ffmpeg_exe:
+    st.error("⚠️ FFmpeg not found. Add `ffmpeg` to apt.txt (Streamlit Cloud) or add `imageio-ffmpeg` to requirements.txt.")
     st.stop()
 
 # ---------------- UI inputs ----------------
@@ -72,7 +121,6 @@ with col2:
 log_area = st.empty()
 progress_bar = st.progress(0)
 status_text = st.empty()
-
 
 # ---------------- Spotify API Functions ----------------
 def get_spotify_token(client_id, client_secret):
@@ -133,17 +181,21 @@ def extract_tracks_from_spotify(playlist_data):
 
 
 # ---------------- SpotDL Download Function ----------------
-def download_with_spotdl(playlist_url, output_dir, audio_format="mp3", bitrate="320k"):
-    """Download playlist using spotdl command."""
+def download_with_spotdl(playlist_url, output_dir, audio_format="mp3", bitrate="320k", ffmpeg_path=None):
+    """Download playlist using spotdl command called as a Python module."""
     try:
+        # Use python -m spotdl to avoid shell PATH issues and pass explicit ffmpeg path
         cmd = [
-            'spotdl',
+            sys.executable, "-m", "spotdl",
             playlist_url,
-            '--output', output_dir,
-            '--format', audio_format,
-            '--bitrate', bitrate,
-            '--print-errors'
+            "--output", output_dir,
+            "--format", audio_format,
+            "--bitrate", bitrate,
+            "--print-errors",
         ]
+
+        if ffmpeg_path:
+            cmd.extend(["--ffmpeg", ffmpeg_path])
 
         process = subprocess.Popen(
             cmd,
@@ -181,7 +233,6 @@ if "logs" not in st.session_state:
 def append_log(msg):
     st.session_state.logs.append(msg)
     log_area.text("\n".join(st.session_state.logs[-30:]))
-
 
 # ---------------- Fetch Button ----------------
 if fetch_btn:
@@ -244,9 +295,10 @@ if download_btn:
             status_text.text("Downloading songs...")
 
             download_count = 0
-            for output in download_with_spotdl(playlist_url, temp_dir, audio_format, audio_quality):
+            for output in download_with_spotdl(playlist_url, temp_dir, audio_format, audio_quality, ffmpeg_path=ffmpeg_exe):
                 append_log(output)
-                if "Downloaded" in output:
+                # SpotDL output may vary, adjust matching if needed
+                if "Downloaded" in output or "has been downloaded" in output:
                     download_count += 1
                     progress_bar.progress(min(download_count / max(len(st.session_state.playlist_tracks), 1), 1.0))
 
@@ -332,7 +384,7 @@ with st.expander("💡 How to Use"):
     - SpotDL downloads high-quality audio from YouTube Music
     - Songs include proper metadata (artist, album, cover art)
     - Download speed depends on your internet connection
-    - For large playlists, be patient - quality takes time!
+    - For large playlists, be patient - quality takes time! 
 
     ### Formats Available:
     - **MP3**: Best compatibility (recommended)
