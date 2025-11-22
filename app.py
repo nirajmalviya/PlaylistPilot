@@ -21,13 +21,13 @@ SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 
 st.set_page_config(page_title="Spotify Playlist Downloader", layout="wide")
-st.title("🎵 Spotify Playlist Downloader")
+st.title("🎵 Spotify Playlist & Track Downloader")
 
 st.markdown("""
-Download your favorite Spotify playlists with **album covers** from multiple sources:
-1. Paste your Spotify playlist URL
-2. Click **Fetch Playlist** to see the songs
-3. Click **Download All** - automatically tries YouTube, Soundcloud, and more!
+Download your favorite Spotify playlists or individual songs with **album covers**:
+1. Paste your Spotify playlist OR track URL
+2. Click **Fetch** to see the songs
+3. Click **Download** - automatically tries YouTube, Soundcloud, and more!
 """)
 
 
@@ -49,13 +49,13 @@ if not ytdlp_installed:
 
 # ---------------- UI inputs ----------------
 playlist_url = st.text_input(
-    "Spotify Playlist URL",
-    placeholder="https://open.spotify.com/playlist/37i9dQZF1E38Nuyz9Gc1Wd"
+    "Spotify Playlist or Track URL",
+    placeholder="https://open.spotify.com/playlist/... or https://open.spotify.com/track/..."
 )
 
 with st.expander("⚙️ Download Settings"):
     audio_format = st.selectbox(
-        "Audio Format", 
+        "Audio Format",
         ["m4a", "mp3"],
         help="m4a: No FFmpeg needed. mp3: Requires FFmpeg but more compatible."
     )
@@ -64,7 +64,7 @@ with st.expander("⚙️ Download Settings"):
 
 col1, col2 = st.columns(2)
 with col1:
-    fetch_btn = st.button("🔍 Fetch Playlist Info", use_container_width=True)
+    fetch_btn = st.button("🔍 Fetch Info", use_container_width=True)
 with col2:
     download_btn = st.button("⬇️ Download All", use_container_width=True, type="primary")
 
@@ -90,18 +90,33 @@ def get_spotify_token(client_id, client_secret):
     return response.json()["access_token"]
 
 
-def extract_playlist_id(url):
-    """Extract playlist ID from Spotify URL."""
-    match = re.search(r'playlist/([a-zA-Z0-9]+)', url)
-    if match:
-        return match.group(1)
-    return None
+def extract_spotify_id(url):
+    """Extract playlist or track ID from Spotify URL."""
+    playlist_match = re.search(r'playlist/([a-zA-Z0-9]+)', url)
+    if playlist_match:
+        return 'playlist', playlist_match.group(1)
+
+    track_match = re.search(r'track/([a-zA-Z0-9]+)', url)
+    if track_match:
+        return 'track', track_match.group(1)
+
+    return None, None
 
 
 def fetch_spotify_playlist(playlist_id, token):
     """Fetch playlist data from Spotify API."""
     headers = {"Authorization": f"Bearer {token}"}
     url = f"https://api.spotify.com/v1/playlists/{playlist_id}"
+
+    response = requests.get(url, headers=headers)
+    response.raise_for_status()
+    return response.json()
+
+
+def fetch_spotify_track(track_id, token):
+    """Fetch single track data from Spotify API."""
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"https://api.spotify.com/v1/tracks/{track_id}"
 
     response = requests.get(url, headers=headers)
     response.raise_for_status()
@@ -136,6 +151,25 @@ def extract_tracks_from_spotify(playlist_data):
     return tracks
 
 
+def extract_single_track_info(track_data):
+    """Extract information from a single Spotify track."""
+    album = track_data.get("album", {})
+    images = album.get("images", [])
+    cover_url = images[0]["url"] if images else None
+
+    track_info = {
+        "id": track_data.get("id"),
+        "name": track_data.get("name"),
+        "artists": ", ".join([a["name"] for a in track_data.get("artists", [])]),
+        "album": album.get("name", ""),
+        "duration_ms": track_data.get("duration_ms"),
+        "spotify_url": track_data.get("external_urls", {}).get("spotify", ""),
+        "cover_url": cover_url,
+    }
+
+    return track_info
+
+
 def download_cover_art(cover_url):
     """Download album cover from URL."""
     try:
@@ -154,24 +188,24 @@ def add_metadata_to_file(file_path, track_info, cover_data):
             audio["\xa9nam"] = track_info["name"]
             audio["\xa9ART"] = track_info["artists"]
             audio["\xa9alb"] = track_info["album"]
-            
+
             if cover_data:
                 audio["covr"] = [MP4Cover(cover_data, imageformat=MP4Cover.FORMAT_JPEG)]
-            
+
             audio.save()
-            
+
         elif file_path.endswith('.mp3'):
             audio = MP3(file_path, ID3=ID3)
-            
+
             try:
                 audio.add_tags()
             except:
                 pass
-            
+
             audio.tags.add(TIT2(encoding=3, text=track_info["name"]))
             audio.tags.add(TPE1(encoding=3, text=track_info["artists"]))
             audio.tags.add(TALB(encoding=3, text=track_info["album"]))
-            
+
             if cover_data:
                 audio.tags.add(
                     APIC(
@@ -182,9 +216,9 @@ def add_metadata_to_file(file_path, track_info, cover_data):
                         data=cover_data
                     )
                 )
-            
+
             audio.save()
-        
+
         return True
     except Exception as e:
         return False
@@ -209,42 +243,48 @@ def download_track_multisource(track_info, output_dir, audio_format="m4a", quali
     """Download a single track using multiple sources."""
     track_name = track_info["name"]
     artist_name = track_info["artists"]
-    
+
     # Clean filename
     safe_filename = clean_filename(f"{artist_name} - {track_name}")
-    
+
     # Check if already downloaded
     possible_extensions = ['m4a', 'mp3', 'webm', 'opus']
     exists, existing_file = file_exists_in_dir(output_dir, safe_filename, possible_extensions)
     if exists:
         return True, existing_file, "Already downloaded"
-    
+
     output_template = os.path.join(output_dir, f"{safe_filename}.%(ext)s")
-    
+
     # Source configurations (in priority order)
+    # Using filters to avoid remixes, slowed, reverb, sped up versions
     sources = [
         {
-            "name": "YouTube Music",
-            "url": f"ytsearch1:{artist_name} {track_name} official audio",
+            "name": "YouTube Music (Official Audio)",
+            "url": f"ytsearch1:{artist_name} - {track_name} official audio",
             "extra_args": []
         },
         {
-            "name": "YouTube",
-            "url": f"ytsearch1:{artist_name} {track_name} lyrics",
+            "name": "YouTube (Topic Channel)",
+            "url": f"ytsearch1:{artist_name} - {track_name} topic",
+            "extra_args": []
+        },
+        {
+            "name": "YouTube (Provided to YouTube)",
+            "url": f"ytsearch1:{artist_name} {track_name} provided to youtube",
+            "extra_args": []
+        },
+        {
+            "name": "YouTube (Audio)",
+            "url": f"ytsearch1:{artist_name} {track_name} audio",
             "extra_args": []
         },
         {
             "name": "Soundcloud",
             "url": f"scsearch1:{artist_name} {track_name}",
             "extra_args": ['--extractor-args', 'soundcloud:client_id=']
-        },
-        {
-            "name": "YouTube (Alternative)",
-            "url": f"ytsearch1:{track_name} {artist_name}",
-            "extra_args": []
         }
     ]
-    
+
     # Format options
     if audio_format == "m4a":
         format_arg = "bestaudio[ext=m4a]/bestaudio/best"
@@ -252,7 +292,7 @@ def download_track_multisource(track_info, output_dir, audio_format="m4a", quali
         format_arg = "bestaudio/best"
     else:
         format_arg = "bestaudio/best"
-    
+
     for source in sources:
         try:
             cmd = [
@@ -267,41 +307,49 @@ def download_track_multisource(track_info, output_dir, audio_format="m4a", quali
                 '--socket-timeout', '30',
                 '--retries', '3',
                 '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                # Filter to avoid remixes and edits
+                '--match-filter', '!is_live & !was_live',
+                '--default-search', 'ytsearch',
             ]
-            
+
             # Add source-specific args
             cmd.extend(source["extra_args"])
-            
+
             # Add post-processing for mp3
             if audio_format == "mp3":
                 cmd.extend([
                     '--audio-format', 'mp3',
                     '--audio-quality', quality if quality != "best" else "0"
                 ])
-            
+
             cmd.append(source["url"])
-            
+
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=120
             )
-            
+
             if result.returncode == 0:
                 # Find the downloaded file
                 exists, downloaded_file = file_exists_in_dir(output_dir, safe_filename, possible_extensions)
                 if exists:
-                    return True, downloaded_file, source["name"]
-            
+                    # Verify the file is not empty or corrupted
+                    if os.path.getsize(downloaded_file) > 50000:  # At least 50KB
+                        return True, downloaded_file, source["name"]
+                    else:
+                        # File too small, might be corrupted, try next source
+                        os.remove(downloaded_file)
+
             # If failed, try next source
             time.sleep(1)
-            
+
         except subprocess.TimeoutExpired:
             continue
         except Exception as e:
             continue
-    
+
     return False, None, "All sources failed"
 
 
@@ -310,43 +358,43 @@ def download_playlist_multisource(tracks, output_dir, audio_format="m4a", qualit
     downloaded = 0
     failed = []
     skipped = 0
-    
+
     for idx, track in enumerate(tracks, 1):
         track_name = track["name"]
         artist_name = track["artists"]
-        
+
         yield f"[{idx}/{len(tracks)}] Processing: {artist_name} - {track_name}"
-        
+
         success, file_path, source = download_track_multisource(
             track, output_dir, audio_format, quality
         )
-        
+
         if success and file_path:
             if source == "Already downloaded":
                 yield f"⏭️  Skipped (already exists): {track_name}"
                 skipped += 1
             else:
                 yield f"✅ Downloaded from {source}: {track_name}"
-                
+
                 # Add metadata and cover art
                 if add_metadata:
                     yield f"🎨 Adding album cover and metadata..."
                     cover_data = None
                     if track.get("cover_url"):
                         cover_data = download_cover_art(track["cover_url"])
-                    
+
                     if add_metadata_to_file(file_path, track, cover_data):
                         yield f"✅ Metadata added"
                     else:
                         yield f"⚠️  Metadata failed (file still usable)"
-                
+
                 downloaded += 1
         else:
             yield f"❌ Failed: {track_name} - {source}"
             failed.append(f"{artist_name} - {track_name}")
-        
+
         yield f"Progress: {downloaded}/{len(tracks)} downloaded, {skipped} skipped"
-    
+
     yield f"\n🎉 Complete! {downloaded}/{len(tracks)} downloaded, {skipped} skipped"
     if failed:
         yield f"⚠️  Failed tracks ({len(failed)}): " + ", ".join(failed[:5])
@@ -359,6 +407,8 @@ if "playlist_tracks" not in st.session_state:
     st.session_state.playlist_tracks = []
 if "playlist_name" not in st.session_state:
     st.session_state.playlist_name = ""
+if "content_type" not in st.session_state:
+    st.session_state.content_type = ""
 if "logs" not in st.session_state:
     st.session_state.logs = []
 
@@ -371,25 +421,27 @@ def append_log(msg):
 # ---------------- Fetch Button ----------------
 if fetch_btn:
     if not playlist_url.strip():
-        st.error("Please enter a playlist URL")
+        st.error("Please enter a playlist or track URL")
     else:
         try:
             with st.spinner("Authenticating with Spotify..."):
                 token = get_spotify_token(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)
 
-            playlist_id = extract_playlist_id(playlist_url)
-            if not playlist_id:
-                st.error("Invalid Spotify playlist URL")
-            else:
+            content_type, content_id = extract_spotify_id(playlist_url)
+
+            if not content_type or not content_id:
+                st.error("Invalid Spotify URL. Please use a playlist or track URL.")
+            elif content_type == "playlist":
                 with st.spinner("Fetching playlist..."):
-                    playlist_data = fetch_spotify_playlist(playlist_id, token)
+                    playlist_data = fetch_spotify_playlist(content_id, token)
 
                 tracks = extract_tracks_from_spotify(playlist_data)
                 st.session_state.playlist_tracks = tracks
                 st.session_state.playlist_name = playlist_data.get('name', 'playlist')
+                st.session_state.content_type = "playlist"
 
                 if tracks:
-                    st.success(f"✅ Found {len(tracks)} tracks")
+                    st.success(f"✅ Found {len(tracks)} tracks in playlist")
 
                     # Display tracks
                     df = pd.DataFrame(tracks)
@@ -404,6 +456,27 @@ if fetch_btn:
                 else:
                     st.warning("No tracks found in playlist")
 
+            elif content_type == "track":
+                with st.spinner("Fetching track..."):
+                    track_data = fetch_spotify_track(content_id, token)
+
+                track_info = extract_single_track_info(track_data)
+                st.session_state.playlist_tracks = [track_info]
+                st.session_state.playlist_name = f"{track_info['artists']} - {track_info['name']}"
+                st.session_state.content_type = "track"
+
+                st.success(f"✅ Track found")
+
+                # Display track
+                df = pd.DataFrame([track_info])
+                st.dataframe(
+                    df[["name", "artists", "album"]],
+                    use_container_width=True
+                )
+
+                # Show track info
+                st.info(f"**{track_info['name']}** by {track_info['artists']}")
+
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 401:
                 st.error("❌ Authentication error. Please contact support.")
@@ -415,9 +488,9 @@ if fetch_btn:
 # ---------------- Download Button ----------------
 if download_btn:
     if not playlist_url.strip():
-        st.error("Please enter a playlist URL first")
+        st.error("Please enter a URL first")
     elif not st.session_state.playlist_tracks:
-        st.warning("Please fetch the playlist first by clicking 'Fetch Playlist Info'")
+        st.warning("Please fetch the playlist/track first by clicking 'Fetch Info'")
     else:
         st.session_state.logs = []
         append_log("🚀 Starting download process...")
@@ -432,13 +505,13 @@ if download_btn:
 
             download_count = 0
             total_tracks = len(st.session_state.playlist_tracks)
-            
+
             for output in download_playlist_multisource(
-                st.session_state.playlist_tracks, 
-                temp_dir, 
-                audio_format,
-                audio_quality,
-                add_metadata
+                    st.session_state.playlist_tracks,
+                    temp_dir,
+                    audio_format,
+                    audio_quality,
+                    add_metadata
             ):
                 append_log(output)
                 if "✅ Downloaded from" in output:
@@ -449,7 +522,7 @@ if download_btn:
             downloaded_files = []
             for ext in ['m4a', 'mp3', 'webm', 'opus']:
                 downloaded_files.extend(list(Path(temp_dir).glob(f"*.{ext}")))
-            
+
             # Remove duplicates based on filename (keep first occurrence)
             seen = set()
             unique_files = []
@@ -462,35 +535,52 @@ if download_btn:
             if unique_files:
                 append_log(f"\n✅ Successfully downloaded {len(unique_files)} unique songs with metadata")
 
-                # Create ZIP file
-                append_log("📦 Creating ZIP file...")
-                zip_buffer = BytesIO()
+                # For single track, provide direct download
+                if st.session_state.content_type == "track" and len(unique_files) == 1:
+                    file_path = unique_files[0]
+                    with open(file_path, 'rb') as f:
+                        file_data = f.read()
 
-                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                    for file_path in unique_files:
-                        zip_file.write(file_path, file_path.name)
+                    st.success(f"🎉 Downloaded song with album cover!")
 
-                zip_buffer.seek(0)
+                    st.download_button(
+                        label=f"📥 Download {file_path.name}",
+                        data=file_data,
+                        file_name=file_path.name,
+                        mime="audio/mpeg" if file_path.suffix == ".mp3" else "audio/mp4",
+                        use_container_width=True
+                    )
 
-                # Clean playlist name for filename
-                playlist_name_safe = "".join(
-                    c for c in st.session_state.playlist_name if c.isalnum() or c in (' ', '-', '_'))
-                if not playlist_name_safe:
-                    playlist_name_safe = "playlist"
-                zip_filename = f"{playlist_name_safe}_songs.zip"
+                else:
+                    # Create ZIP file for multiple tracks
+                    append_log("📦 Creating ZIP file...")
+                    zip_buffer = BytesIO()
 
-                st.success(f"🎉 Downloaded {len(unique_files)} songs with album covers!")
+                    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                        for file_path in unique_files:
+                            zip_file.write(file_path, file_path.name)
 
-                # Download button
-                st.download_button(
-                    label=f"📦 Download ZIP File ({len(unique_files)} songs)",
-                    data=zip_buffer.getvalue(),
-                    file_name=zip_filename,
-                    mime="application/zip",
-                    use_container_width=True
-                )
+                    zip_buffer.seek(0)
 
-                st.info(f"💾 Click the button above to download all songs with embedded album art")
+                    # Clean playlist name for filename
+                    playlist_name_safe = "".join(
+                        c for c in st.session_state.playlist_name if c.isalnum() or c in (' ', '-', '_'))
+                    if not playlist_name_safe:
+                        playlist_name_safe = "playlist"
+                    zip_filename = f"{playlist_name_safe}_songs.zip"
+
+                    st.success(f"🎉 Downloaded {len(unique_files)} songs with album covers!")
+
+                    # Download button
+                    st.download_button(
+                        label=f"📦 Download ZIP File ({len(unique_files)} songs)",
+                        data=zip_buffer.getvalue(),
+                        file_name=zip_filename,
+                        mime="application/zip",
+                        use_container_width=True
+                    )
+
+                st.info(f"💾 Click the button above to download")
             else:
                 st.error("❌ No songs were downloaded. Check the logs above for errors.")
 
@@ -519,26 +609,34 @@ with st.expander("💡 How to Use"):
 
     ### Steps:
 
-    1. **Get Playlist URL**: 
-       - Open Spotify and go to your playlist
-       - Click Share → Copy Playlist Link
+    1. **Get URL**: 
+       - For playlist: Share → Copy Playlist Link
+       - For single song: Share → Copy Song Link
 
-    2. **Fetch Playlist**: 
-       - Click "Fetch Playlist Info" to load tracks
+    2. **Fetch**: 
+       - Click "Fetch Info" to load track(s)
 
     3. **Download**: 
        - Click "Download All"
        - Automatically tries multiple sources
        - Album covers are embedded
 
+    ### Supported URLs:
+    - ✅ Playlist: `https://open.spotify.com/playlist/...`
+    - ✅ Single Track: `https://open.spotify.com/track/...`
+
     ### Multi-Source Download:
-    The tool tries sources in this order:
+    The tool tries sources in this order (prioritizing official releases):
     1. **YouTube Music** (official audio)
-    2. **YouTube** (lyrics version)
-    3. **Soundcloud** (if available)
-    4. **YouTube Alternative** (different search)
+    2. **YouTube** (Topic channel - official uploads)
+    3. **YouTube** (Provided to YouTube - label uploads)
+    4. **YouTube** (Audio versions)
+    5. **Soundcloud** (if available)
+
+    Search queries are optimized to avoid remixes, slowed versions, and fan edits.
 
     ### Features:
+    - ✅ **Playlists & Single Tracks**
     - ✅ **No duplicates** - smart file checking
     - ✅ **Album covers** embedded automatically
     - ✅ **Multiple sources** - higher success rate
