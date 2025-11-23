@@ -598,58 +598,6 @@ if download_btn:
             progress_bar.progress(1.0)
 
 # ---------------- Help Section ----------------
-with st.expander("💡 How to Use"):
-    st.markdown("""
-    ### Installation:
-
-    Install required packages:
-    ```bash
-    pip install yt-dlp mutagen requests
-    ```
-
-    ### Steps:
-
-    1. **Get URL**: 
-       - For playlist: Share → Copy Playlist Link
-       - For single song: Share → Copy Song Link
-
-    2. **Fetch**: 
-       - Click "Fetch Info" to load track(s)
-
-    3. **Download**: 
-       - Click "Download All"
-       - Automatically tries multiple sources
-       - Album covers are embedded
-
-    ### Supported URLs:
-    - ✅ Playlist: `https://open.spotify.com/playlist/...`
-    - ✅ Single Track: `https://open.spotify.com/track/...`
-
-    ### Multi-Source Download:
-    The tool tries sources in this order (prioritizing official releases):
-    1. **YouTube Music** (official audio)
-    2. **YouTube** (Topic channel - official uploads)
-    3. **YouTube** (Provided to YouTube - label uploads)
-    4. **YouTube** (Audio versions)
-    5. **Soundcloud** (if available)
-
-    Search queries are optimized to avoid remixes, slowed versions, and fan edits.
-
-    ### Features:
-    - ✅ **Playlists & Single Tracks**
-    - ✅ **No duplicates** - smart file checking
-    - ✅ **Album covers** embedded automatically
-    - ✅ **Multiple sources** - higher success rate
-    - ✅ **Skip existing** - resume interrupted downloads
-    - ✅ **Metadata included** (artist, title, album)
-
-    ### Format Guide:
-    - **M4A**: No FFmpeg needed, excellent quality
-    - **MP3**: Requires FFmpeg, universal compatibility
-
-    ### Legal Note:
-    ⚠️ This tool is for personal use only. Please respect copyright laws.
-    """)
 
 # Footer
 st.markdown("---")
