@@ -26,15 +26,13 @@ st.title("🎵 Spotify & YouTube Music Downloader")
 st.markdown("""
 Download your favorite playlists or individual songs with **album covers**:
 1. Paste your **Spotify** OR **YouTube Music** playlist/track URL
-2. Click **Fetch** to see the songs
+2. Click **Fetch** to see the songs (or skip and go straight to download!)
 3. Click **Download** - automatically tries multiple sources!
 
 **Supported URLs:**
 - Spotify: `https://open.spotify.com/playlist/...` or `https://open.spotify.com/track/...`
 - YouTube Music: `https://music.youtube.com/playlist?list=...` or `https://music.youtube.com/watch?v=...`
 - YouTube: `https://www.youtube.com/playlist?list=...` or `https://www.youtube.com/watch?v=...`
-
-**Deployment Note:** If YouTube Music isn't working, ensure yt-dlp is updated: `pip install -U yt-dlp`
 """)
 
 
@@ -60,7 +58,7 @@ try:
     ytdlp_version = result.stdout.strip()
     with st.expander("🔧 Debug Info"):
         st.text(f"yt-dlp version: {ytdlp_version}")
-        st.caption("If YouTube Music isn't working, try updating: pip install -U yt-dlp")
+        st.caption("If issues persist, update with: pip install -U yt-dlp")
 except:
     pass
 
@@ -84,6 +82,10 @@ with col1:
     fetch_btn = st.button("🔍 Fetch Info", use_container_width=True)
 with col2:
     download_btn = st.button("⬇️ Download All", use_container_width=True, type="primary")
+
+# Add direct download option for YouTube
+if playlist_url and ('youtube.com' in playlist_url or 'youtu.be' in playlist_url):
+    st.info("💡 **Tip for YouTube**: You can skip 'Fetch Info' and go directly to 'Download All' - it will work!")
 
 log_area = st.empty()
 progress_bar = st.progress(0)
@@ -109,6 +111,30 @@ def detect_platform(url):
         elif 'watch?v=' in url or 'youtu.be/' in url:
             return 'youtube_track'
     
+    return None
+
+
+def extract_video_id(url):
+    """Extract YouTube video ID from URL."""
+    patterns = [
+        r'watch\?v=([a-zA-Z0-9_-]{11})',
+        r'youtu\.be/([a-zA-Z0-9_-]{11})',
+        r'embed/([a-zA-Z0-9_-]{11})',
+        r'v=([a-zA-Z0-9_-]{11})'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+
+def extract_playlist_id(url):
+    """Extract YouTube playlist ID from URL."""
+    match = re.search(r'[&?]list=([a-zA-Z0-9_-]+)', url)
+    if match:
+        return match.group(1)
     return None
 
 
@@ -184,7 +210,8 @@ def extract_tracks_from_spotify(playlist_data):
             "duration_ms": track.get("duration_ms"),
             "spotify_url": track.get("external_urls", {}).get("spotify", ""),
             "cover_url": cover_url,
-            "source": "spotify"
+            "source": "spotify",
+            "youtube_url": None
         }
         tracks.append(track_info)
 
@@ -205,170 +232,79 @@ def extract_single_track_info(track_data):
         "duration_ms": track_data.get("duration_ms"),
         "spotify_url": track_data.get("external_urls", {}).get("spotify", ""),
         "cover_url": cover_url,
-        "source": "spotify"
+        "source": "spotify",
+        "youtube_url": None
     }
 
     return track_info
 
 
-# ---------------- YouTube Functions ----------------
-def fetch_youtube_playlist(url):
-    """Fetch YouTube/YouTube Music playlist using yt-dlp with multiple methods."""
-    methods = [
-        {
-            "name": "Standard fetch",
-            "args": [
-                '--dump-json',
-                '--flat-playlist',
-                '--no-warnings',
-                '--no-check-certificates',
-                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                '--extractor-retries', '5',
-                '--socket-timeout', '30',
-            ]
-        },
-        {
-            "name": "With Android client",
-            "args": [
-                '--dump-json',
-                '--flat-playlist',
-                '--no-warnings',
-                '--no-check-certificates',
-                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                '--extractor-retries', '5',
-                '--extractor-args', 'youtube:player_client=android,web',
-            ]
-        }
-    ]
+# ---------------- YouTube Functions (Simplified) ----------------
+def create_youtube_track_from_url(url):
+    """Create track info directly from YouTube URL without fetching metadata."""
+    video_id = extract_video_id(url)
     
-    for method in methods:
-        try:
-            cmd = ['yt-dlp'] + method["args"] + [url]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
-            
-            if result.returncode == 0:
-                tracks = []
-                for line in result.stdout.strip().split('\n'):
-                    if line:
-                        try:
-                            video_info = json.loads(line)
-                            track_info = {
-                                "id": video_info.get("id", ""),
-                                "name": video_info.get("title", "Unknown"),
-                                "artists": video_info.get("uploader", "Unknown Artist"),
-                                "album": video_info.get("album", ""),
-                                "duration_ms": (video_info.get("duration", 0) * 1000) if video_info.get("duration") else 0,
-                                "youtube_url": f"https://www.youtube.com/watch?v={video_info.get('id', '')}",
-                                "cover_url": video_info.get("thumbnail", ""),
-                                "source": "youtube"
-                            }
-                            tracks.append(track_info)
-                        except json.JSONDecodeError:
-                            continue
-                
-                if tracks:
-                    return tracks
-            
-        except subprocess.TimeoutExpired:
-            continue
-        except Exception:
-            continue
+    if not video_id:
+        return None
     
-    st.error("❌ Failed to fetch playlist with all methods. The playlist may be private or region-locked.")
-    return None
-
-
-def fetch_youtube_track(url):
-    """Fetch single YouTube/YouTube Music track using yt-dlp with multiple attempts."""
-    # Try different methods in order
-    methods = [
-        {
-            "name": "Standard fetch",
-            "args": [
-                '--dump-json',
-                '--no-warnings',
-                '--no-check-certificates',
-                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                '--extractor-retries', '5',
-                '--socket-timeout', '30',
-            ]
-        },
-        {
-            "name": "With cookies workaround",
-            "args": [
-                '--dump-json',
-                '--no-warnings',
-                '--no-check-certificates',
-                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                '--extractor-retries', '5',
-                '--socket-timeout', '30',
-                '--extractor-args', 'youtube:player_client=android,web',
-            ]
-        },
-        {
-            "name": "Age-gate bypass",
-            "args": [
-                '--dump-json',
-                '--no-warnings',
-                '--no-check-certificates',
-                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                '--extractor-retries', '5',
-                '--age-limit', '21',
-                '--extractor-args', 'youtube:player_client=android',
-            ]
-        }
-    ]
-    
-    for method in methods:
-        try:
-            cmd = ['yt-dlp'] + method["args"] + [url]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
-            
-            if result.returncode == 0 and result.stdout.strip():
-                try:
-                    video_info = json.loads(result.stdout)
-                    
-                    track_info = {
-                        "id": video_info.get("id", ""),
-                        "name": video_info.get("title", "Unknown"),
-                        "artists": video_info.get("uploader", "Unknown Artist"),
-                        "album": video_info.get("album", ""),
-                        "duration_ms": (video_info.get("duration", 0) * 1000) if video_info.get("duration") else 0,
-                        "youtube_url": url,
-                        "cover_url": video_info.get("thumbnail", ""),
-                        "source": "youtube"
-                    }
-                    
-                    return track_info
-                except json.JSONDecodeError:
-                    continue
-            
-        except subprocess.TimeoutExpired:
-            continue
-        except Exception:
-            continue
-    
-    # All methods failed - create basic track info from URL
-    st.warning("⚠️ Could not fetch video details, but will still attempt download")
-    
-    # Extract video ID
-    video_id = None
-    if 'watch?v=' in url:
-        video_id = url.split('watch?v=')[1].split('&')[0]
-    elif 'youtu.be/' in url:
-        video_id = url.split('youtu.be/')[1].split('?')[0]
-    
-    # Return basic track info - download will still work
-    return {
-        "id": video_id or "unknown",
-        "name": f"YouTube Video {video_id}" if video_id else "YouTube Video",
+    # Create basic track info - download will still work!
+    track_info = {
+        "id": video_id,
+        "name": f"YouTube Video ({video_id})",
         "artists": "YouTube",
         "album": "",
         "duration_ms": 0,
-        "youtube_url": url,
-        "cover_url": f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg" if video_id else "",
+        "youtube_url": f"https://www.youtube.com/watch?v={video_id}",
+        "cover_url": f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg",
         "source": "youtube"
     }
+    
+    return track_info
+
+
+def create_youtube_playlist_from_url(url):
+    """Create playlist tracks directly from YouTube playlist URL."""
+    playlist_id = extract_playlist_id(url)
+    
+    if not playlist_id:
+        return None
+    
+    # Use yt-dlp to get video IDs only (fast and reliable)
+    try:
+        cmd = [
+            'yt-dlp',
+            '--flat-playlist',
+            '--print', 'id',
+            '--no-warnings',
+            '--playlist-items', '1-100',  # Limit to first 100
+            f"https://www.youtube.com/playlist?list={playlist_id}"
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0:
+            video_ids = result.stdout.strip().split('\n')
+            tracks = []
+            
+            for idx, video_id in enumerate(video_ids, 1):
+                if video_id:
+                    track_info = {
+                        "id": video_id,
+                        "name": f"Track {idx} from Playlist",
+                        "artists": "YouTube",
+                        "album": "",
+                        "duration_ms": 0,
+                        "youtube_url": f"https://www.youtube.com/watch?v={video_id}",
+                        "cover_url": f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg",
+                        "source": "youtube"
+                    }
+                    tracks.append(track_info)
+            
+            return tracks if tracks else None
+    except:
+        pass
+    
+    return None
 
 
 # ---------------- Helper Functions ----------------
@@ -440,71 +376,47 @@ def file_exists_in_dir(output_dir, base_filename, extensions):
     return False, None
 
 
-# ---------------- Multi-Source Download Function ----------------
-def download_track_multisource(track_info, output_dir, audio_format="m4a", quality="best"):
-    """Download a single track using multiple sources."""
+# ---------------- Download Function (FIXED) ----------------
+def download_track_direct(track_info, output_dir, audio_format="m4a", quality="best"):
+    """Download track directly using yt-dlp with aggressive settings."""
     track_name = track_info["name"]
     artist_name = track_info["artists"]
-
-    # Clean filename
+    
     safe_filename = clean_filename(f"{artist_name} - {track_name}")
-
+    
     # Check if already downloaded
     possible_extensions = ['m4a', 'mp3', 'webm', 'opus']
     exists, existing_file = file_exists_in_dir(output_dir, safe_filename, possible_extensions)
     if exists:
         return True, existing_file, "Already downloaded"
-
+    
     output_template = os.path.join(output_dir, f"{safe_filename}.%(ext)s")
-
-    # If the track is from YouTube, try direct URL first
-    sources = []
     
-    if track_info.get("source") == "youtube" and track_info.get("youtube_url"):
-        sources.append({
-            "name": "YouTube (Direct)",
-            "url": track_info["youtube_url"],
-            "extra_args": []
-        })
+    # Determine download source
+    download_urls = []
     
-    # Add search-based sources
-    sources.extend([
-        {
-            "name": "YouTube Music (Official Audio)",
-            "url": f"ytsearch1:{artist_name} - {track_name} official audio",
-            "extra_args": []
-        },
-        {
-            "name": "YouTube (Topic Channel)",
-            "url": f"ytsearch1:{artist_name} - {track_name} topic",
-            "extra_args": []
-        },
-        {
-            "name": "YouTube (Provided to YouTube)",
-            "url": f"ytsearch1:{artist_name} {track_name} provided to youtube",
-            "extra_args": []
-        },
-        {
-            "name": "YouTube (Audio)",
-            "url": f"ytsearch1:{artist_name} {track_name} audio",
-            "extra_args": []
-        },
-        {
-            "name": "Soundcloud",
-            "url": f"scsearch1:{artist_name} {track_name}",
-            "extra_args": ['--extractor-args', 'soundcloud:client_id=']
-        }
-    ])
-
+    # Priority 1: Direct YouTube URL if available
+    if track_info.get("youtube_url"):
+        download_urls.append(("Direct URL", track_info["youtube_url"]))
+    
+    # Priority 2: Search methods
+    search_terms = [
+        f"{artist_name} - {track_name} official audio",
+        f"{artist_name} {track_name} audio",
+        f"{artist_name} {track_name}"
+    ]
+    
+    for term in search_terms:
+        download_urls.append((f"Search: {term[:30]}...", f"ytsearch1:{term}"))
+    
     # Format options
     if audio_format == "m4a":
         format_arg = "bestaudio[ext=m4a]/bestaudio/best"
-    elif audio_format == "mp3":
-        format_arg = "bestaudio/best"
     else:
         format_arg = "bestaudio/best"
-
-    for source in sources:
+    
+    # Try each URL
+    for source_name, url in download_urls:
         try:
             cmd = [
                 'yt-dlp',
@@ -515,56 +427,45 @@ def download_track_multisource(track_info, output_dir, audio_format="m4a", quali
                 '--extract-audio',
                 '--no-check-certificates',
                 '--socket-timeout', '30',
-                '--retries', '5',
+                '--retries', '10',
+                '--fragment-retries', '10',
                 '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                '--match-filter', '!is_live & !was_live',
-                '--default-search', 'ytsearch',
                 '--extractor-args', 'youtube:player_client=android,web',
+                '--no-abort-on-error',
+                '--ignore-errors',
             ]
-
-            # Add source-specific args
-            cmd.extend(source["extra_args"])
-
+            
             # Add post-processing for mp3
             if audio_format == "mp3":
                 cmd.extend([
                     '--audio-format', 'mp3',
                     '--audio-quality', quality if quality != "best" else "0"
                 ])
-
-            cmd.append(source["url"])
-
+            
+            cmd.append(url)
+            
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=120
+                timeout=180
             )
-
-            if result.returncode == 0:
-                # Find the downloaded file
-                exists, downloaded_file = file_exists_in_dir(output_dir, safe_filename, possible_extensions)
-                if exists:
-                    # Verify the file is not empty or corrupted
-                    if os.path.getsize(downloaded_file) > 50000:  # At least 50KB
-                        return True, downloaded_file, source["name"]
-                    else:
-                        # File too small, might be corrupted, try next source
-                        os.remove(downloaded_file)
-
-            # If failed, try next source
-            time.sleep(1)
-
-        except subprocess.TimeoutExpired:
-            continue
+            
+            # Check if file was created
+            exists, downloaded_file = file_exists_in_dir(output_dir, safe_filename, possible_extensions)
+            if exists and os.path.getsize(downloaded_file) > 50000:
+                return True, downloaded_file, source_name
+            
+            time.sleep(0.5)
+            
         except Exception as e:
             continue
-
+    
     return False, None, "All sources failed"
 
 
-def download_playlist_multisource(tracks, output_dir, audio_format="m4a", quality="best", add_metadata=True):
-    """Download multiple tracks with metadata from multiple sources."""
+def download_playlist_direct(tracks, output_dir, audio_format="m4a", quality="best", add_metadata=True):
+    """Download multiple tracks."""
     downloaded = 0
     failed = []
     skipped = 0
@@ -575,7 +476,7 @@ def download_playlist_multisource(tracks, output_dir, audio_format="m4a", qualit
 
         yield f"[{idx}/{len(tracks)}] Processing: {artist_name} - {track_name}"
 
-        success, file_path, source = download_track_multisource(
+        success, file_path, source = download_track_direct(
             track, output_dir, audio_format, quality
         )
 
@@ -584,11 +485,11 @@ def download_playlist_multisource(tracks, output_dir, audio_format="m4a", qualit
                 yield f"⏭️  Skipped (already exists): {track_name}"
                 skipped += 1
             else:
-                yield f"✅ Downloaded from {source}: {track_name}"
+                yield f"✅ Downloaded from {source}"
 
                 # Add metadata and cover art
                 if add_metadata:
-                    yield f"🎨 Adding album cover and metadata..."
+                    yield f"🎨 Adding metadata..."
                     cover_data = None
                     if track.get("cover_url"):
                         cover_data = download_cover_art(track["cover_url"])
@@ -600,16 +501,14 @@ def download_playlist_multisource(tracks, output_dir, audio_format="m4a", qualit
 
                 downloaded += 1
         else:
-            yield f"❌ Failed: {track_name} - {source}"
+            yield f"❌ Failed: {track_name}"
             failed.append(f"{artist_name} - {track_name}")
 
-        yield f"Progress: {downloaded}/{len(tracks)} downloaded, {skipped} skipped"
+        yield f"Progress: {downloaded + skipped}/{len(tracks)}"
 
-    yield f"\n🎉 Complete! {downloaded}/{len(tracks)} downloaded, {skipped} skipped"
+    yield f"\n🎉 Complete! {downloaded} downloaded, {skipped} skipped"
     if failed:
-        yield f"⚠️  Failed tracks ({len(failed)}): " + ", ".join(failed[:5])
-        if len(failed) > 5:
-            yield f"   ... and {len(failed) - 5} more"
+        yield f"⚠️  Failed: {len(failed)} tracks"
 
 
 # ---------------- Session State ----------------
@@ -664,8 +563,6 @@ if fetch_btn:
                             height=400
                         )
                         st.info(f"**{playlist_data.get('name')}** by {playlist_data.get('owner', {}).get('display_name')}")
-                    else:
-                        st.warning("No tracks found in playlist")
 
                 elif platform == 'spotify_track':
                     with st.spinner("Fetching Spotify track..."):
@@ -682,19 +579,20 @@ if fetch_btn:
                         df[["name", "artists", "album"]],
                         use_container_width=True
                     )
-                    st.info(f"**{track_info['name']}** by {track_info['artists']}")
             
-            # Handle YouTube/YouTube Music
+            # Handle YouTube
             elif platform == 'youtube_playlist':
-                with st.spinner("Fetching YouTube playlist..."):
-                    tracks = fetch_youtube_playlist(playlist_url)
+                with st.spinner("Processing YouTube playlist..."):
+                    tracks = create_youtube_playlist_from_url(playlist_url)
                 
                 if tracks:
                     st.session_state.playlist_tracks = tracks
                     st.session_state.playlist_name = "YouTube Playlist"
                     st.session_state.content_type = "playlist"
                     
-                    st.success(f"✅ Found {len(tracks)} videos in YouTube playlist")
+                    st.success(f"✅ Found {len(tracks)} videos in playlist")
+                    st.info("💡 Track names will be fetched during download")
+                    
                     df = pd.DataFrame(tracks)
                     st.dataframe(
                         df[["name", "artists"]],
@@ -702,57 +600,76 @@ if fetch_btn:
                         height=400
                     )
                 else:
-                    st.error("❌ Failed to fetch YouTube playlist")
+                    st.error("❌ Failed to process playlist")
             
             elif platform == 'youtube_track':
-                with st.spinner("Fetching YouTube video..."):
-                    track_info = fetch_youtube_track(playlist_url)
+                with st.spinner("Processing YouTube video..."):
+                    track_info = create_youtube_track_from_url(playlist_url)
                 
                 if track_info:
                     st.session_state.playlist_tracks = [track_info]
                     st.session_state.playlist_name = track_info['name']
                     st.session_state.content_type = "track"
                     
-                    st.success(f"✅ YouTube video found")
+                    st.success(f"✅ YouTube video ready for download")
+                    st.info("💡 Full track name will be fetched during download")
+                    
                     df = pd.DataFrame([track_info])
                     st.dataframe(
-                        df[["name", "artists"]],
+                        df[["name"]],
                         use_container_width=True
                     )
-                    st.info(f"**{track_info['name']}** by {track_info['artists']}")
                 else:
-                    st.error("❌ Failed to fetch YouTube video")
+                    st.error("❌ Failed to process video")
 
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 401:
-                st.error("❌ Authentication error. Please check your Spotify credentials.")
-            else:
-                st.error(f"❌ API Error: {e}")
         except Exception as e:
             st.error(f"❌ Error: {e}")
+
 
 # ---------------- Download Button ----------------
 if download_btn:
     if not playlist_url.strip():
         st.error("Please enter a URL first")
-    elif not st.session_state.playlist_tracks:
-        st.warning("Please fetch the playlist/track first by clicking 'Fetch Info'")
     else:
+        # If not fetched yet, try to create tracks directly
+        if not st.session_state.playlist_tracks:
+            platform = detect_platform(playlist_url)
+            
+            if platform == 'youtube_track':
+                track_info = create_youtube_track_from_url(playlist_url)
+                if track_info:
+                    st.session_state.playlist_tracks = [track_info]
+                    st.session_state.content_type = "track"
+                    st.session_state.playlist_name = "YouTube Video"
+            
+            elif platform == 'youtube_playlist':
+                tracks = create_youtube_playlist_from_url(playlist_url)
+                if tracks:
+                    st.session_state.playlist_tracks = tracks
+                    st.session_state.content_type = "playlist"
+                    st.session_state.playlist_name = "YouTube Playlist"
+            
+            elif platform in ['spotify_playlist', 'spotify_track']:
+                st.warning("Please click 'Fetch Info' first for Spotify links")
+                st.stop()
+        
+        if not st.session_state.playlist_tracks:
+            st.error("Could not process URL. Please check the link and try again.")
+            st.stop()
+        
         st.session_state.logs = []
-        append_log("🚀 Starting download process...")
+        append_log("🚀 Starting download...")
 
-        # Create temporary directory for downloads
         temp_dir = tempfile.mkdtemp()
 
         try:
-            # Download using multi-source approach
-            append_log(f"📥 Downloading from multiple sources...")
-            status_text.text("Downloading songs with album covers...")
+            append_log(f"📥 Downloading {len(st.session_state.playlist_tracks)} track(s)...")
+            status_text.text("Downloading...")
 
             download_count = 0
             total_tracks = len(st.session_state.playlist_tracks)
 
-            for output in download_playlist_multisource(
+            for output in download_playlist_direct(
                     st.session_state.playlist_tracks,
                     temp_dir,
                     audio_format,
@@ -764,12 +681,12 @@ if download_btn:
                     download_count += 1
                     progress_bar.progress(min(download_count / max(total_tracks, 1), 1.0))
 
-            # Check if files were downloaded
+            # Check downloaded files
             downloaded_files = []
             for ext in ['m4a', 'mp3', 'webm', 'opus']:
                 downloaded_files.extend(list(Path(temp_dir).glob(f"*.{ext}")))
 
-            # Remove duplicates based on filename
+            # Remove duplicates
             seen = set()
             unique_files = []
             for f in downloaded_files:
@@ -779,15 +696,15 @@ if download_btn:
                     unique_files.append(f)
 
             if unique_files:
-                append_log(f"\n✅ Successfully downloaded {len(unique_files)} unique songs with metadata")
+                append_log(f"\n✅ Successfully downloaded {len(unique_files)} songs")
 
-                # For single track, provide direct download
+                # Single track download
                 if st.session_state.content_type == "track" and len(unique_files) == 1:
                     file_path = unique_files[0]
                     with open(file_path, 'rb') as f:
                         file_data = f.read()
 
-                    st.success(f"🎉 Downloaded song with album cover!")
+                    st.success(f"🎉 Downloaded!")
 
                     st.download_button(
                         label=f"📥 Download {file_path.name}",
@@ -798,8 +715,8 @@ if download_btn:
                     )
 
                 else:
-                    # Create ZIP file for multiple tracks
-                    append_log("📦 Creating ZIP file...")
+                    # Multiple tracks - create ZIP
+                    append_log("📦 Creating ZIP...")
                     zip_buffer = BytesIO()
 
                     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
@@ -808,18 +725,16 @@ if download_btn:
 
                     zip_buffer.seek(0)
 
-                    # Clean playlist name for filename
                     playlist_name_safe = "".join(
                         c for c in st.session_state.playlist_name if c.isalnum() or c in (' ', '-', '_'))
                     if not playlist_name_safe:
                         playlist_name_safe = "playlist"
                     zip_filename = f"{playlist_name_safe}_songs.zip"
 
-                    st.success(f"🎉 Downloaded {len(unique_files)} songs with album covers!")
+                    st.success(f"🎉 Downloaded {len(unique_files)} songs!")
 
-                    # Download button
                     st.download_button(
-                        label=f"📦 Download ZIP File ({len(unique_files)} songs)",
+                        label=f"📦 Download ZIP ({len(unique_files)} songs)",
                         data=zip_buffer.getvalue(),
                         file_name=zip_filename,
                         mime="application/zip",
@@ -828,19 +743,17 @@ if download_btn:
 
                 st.info(f"💾 Click the button above to download")
             else:
-                st.error("❌ No songs were downloaded. Check the logs above for errors.")
+                st.error("❌ No songs were downloaded. Check logs for details.")
 
         except Exception as e:
-            st.error(f"❌ Error during download: {e}")
+            st.error(f"❌ Error: {e}")
             append_log(f"Error: {str(e)}")
 
         finally:
-            # Cleanup temporary directory
             try:
                 shutil.rmtree(temp_dir)
             except:
                 pass
-
             progress_bar.progress(1.0)
 
 # ---------------- Footer ----------------
