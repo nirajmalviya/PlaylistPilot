@@ -94,21 +94,21 @@ status_text = st.empty()
 def detect_platform(url):
     """Detect which platform the URL is from."""
     url = url.strip()
-
+    
     # Spotify
     if 'spotify.com' in url:
         if 'playlist' in url:
             return 'spotify_playlist'
         elif 'track' in url:
             return 'spotify_track'
-
+    
     # YouTube Music or YouTube
     if 'youtube.com' in url or 'youtu.be' in url or 'music.youtube.com' in url:
         if 'playlist' in url or 'list=' in url:
             return 'youtube_playlist'
         elif 'watch?v=' in url or 'youtu.be/' in url:
             return 'youtube_track'
-
+    
     return None
 
 
@@ -213,100 +213,162 @@ def extract_single_track_info(track_data):
 
 # ---------------- YouTube Functions ----------------
 def fetch_youtube_playlist(url):
-    """Fetch YouTube/YouTube Music playlist using yt-dlp."""
-    try:
-        cmd = [
-            'yt-dlp',
-            '--dump-json',
-            '--flat-playlist',
-            '--quiet',
-            '--no-warnings',
-            '--no-check-certificates',
-            '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            '--extractor-retries', '3',
-            '--socket-timeout', '30',
-            url
-        ]
+    """Fetch YouTube/YouTube Music playlist using yt-dlp with multiple methods."""
+    methods = [
+        {
+            "name": "Standard fetch",
+            "args": [
+                '--dump-json',
+                '--flat-playlist',
+                '--no-warnings',
+                '--no-check-certificates',
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                '--extractor-retries', '5',
+                '--socket-timeout', '30',
+            ]
+        },
+        {
+            "name": "With Android client",
+            "args": [
+                '--dump-json',
+                '--flat-playlist',
+                '--no-warnings',
+                '--no-check-certificates',
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                '--extractor-retries', '5',
+                '--extractor-args', 'youtube:player_client=android,web',
+            ]
+        }
+    ]
+    
+    for method in methods:
+        try:
+            cmd = ['yt-dlp'] + method["args"] + [url]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+            
+            if result.returncode == 0:
+                tracks = []
+                for line in result.stdout.strip().split('\n'):
+                    if line:
+                        try:
+                            video_info = json.loads(line)
+                            track_info = {
+                                "id": video_info.get("id", ""),
+                                "name": video_info.get("title", "Unknown"),
+                                "artists": video_info.get("uploader", "Unknown Artist"),
+                                "album": video_info.get("album", ""),
+                                "duration_ms": (video_info.get("duration", 0) * 1000) if video_info.get("duration") else 0,
+                                "youtube_url": f"https://www.youtube.com/watch?v={video_info.get('id', '')}",
+                                "cover_url": video_info.get("thumbnail", ""),
+                                "source": "youtube"
+                            }
+                            tracks.append(track_info)
+                        except json.JSONDecodeError:
+                            continue
+                
+                if tracks:
+                    return tracks
+            
+        except subprocess.TimeoutExpired:
+            continue
+        except Exception:
+            continue
+    
+    st.error("❌ Failed to fetch playlist with all methods. The playlist may be private or region-locked.")
+    return None
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
 
-        if result.returncode != 0:
-            # Log the error for debugging
-            st.warning(f"yt-dlp error: {result.stderr}")
-            return None
-
-        tracks = []
-        for line in result.stdout.strip().split('\n'):
-            if line:
+def fetch_youtube_track(url):
+    """Fetch single YouTube/YouTube Music track using yt-dlp with multiple attempts."""
+    # Try different methods in order
+    methods = [
+        {
+            "name": "Standard fetch",
+            "args": [
+                '--dump-json',
+                '--no-warnings',
+                '--no-check-certificates',
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                '--extractor-retries', '5',
+                '--socket-timeout', '30',
+            ]
+        },
+        {
+            "name": "With cookies workaround",
+            "args": [
+                '--dump-json',
+                '--no-warnings',
+                '--no-check-certificates',
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                '--extractor-retries', '5',
+                '--socket-timeout', '30',
+                '--extractor-args', 'youtube:player_client=android,web',
+            ]
+        },
+        {
+            "name": "Age-gate bypass",
+            "args": [
+                '--dump-json',
+                '--no-warnings',
+                '--no-check-certificates',
+                '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                '--extractor-retries', '5',
+                '--age-limit', '21',
+                '--extractor-args', 'youtube:player_client=android',
+            ]
+        }
+    ]
+    
+    for method in methods:
+        try:
+            cmd = ['yt-dlp'] + method["args"] + [url]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+            
+            if result.returncode == 0 and result.stdout.strip():
                 try:
-                    video_info = json.loads(line)
+                    video_info = json.loads(result.stdout)
+                    
                     track_info = {
                         "id": video_info.get("id", ""),
                         "name": video_info.get("title", "Unknown"),
                         "artists": video_info.get("uploader", "Unknown Artist"),
                         "album": video_info.get("album", ""),
                         "duration_ms": (video_info.get("duration", 0) * 1000) if video_info.get("duration") else 0,
-                        "youtube_url": f"https://www.youtube.com/watch?v={video_info.get('id', '')}",
+                        "youtube_url": url,
                         "cover_url": video_info.get("thumbnail", ""),
                         "source": "youtube"
                     }
-                    tracks.append(track_info)
+                    
+                    return track_info
                 except json.JSONDecodeError:
                     continue
-
-        return tracks
-    except subprocess.TimeoutExpired:
-        st.error("⏱️ Request timed out. YouTube Music may be slow or blocked.")
-        return None
-    except Exception as e:
-        st.error(f"❌ Error fetching playlist: {str(e)}")
-        return None
-
-
-def fetch_youtube_track(url):
-    """Fetch single YouTube/YouTube Music track using yt-dlp."""
-    try:
-        cmd = [
-            'yt-dlp',
-            '--dump-json',
-            '--quiet',
-            '--no-warnings',
-            '--no-check-certificates',
-            '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            '--extractor-retries', '3',
-            '--socket-timeout', '30',
-            url
-        ]
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
-
-        if result.returncode != 0:
-            st.warning(f"yt-dlp error: {result.stderr}")
-            return None
-
-        video_info = json.loads(result.stdout)
-
-        track_info = {
-            "id": video_info.get("id", ""),
-            "name": video_info.get("title", "Unknown"),
-            "artists": video_info.get("uploader", "Unknown Artist"),
-            "album": video_info.get("album", ""),
-            "duration_ms": (video_info.get("duration", 0) * 1000) if video_info.get("duration") else 0,
-            "youtube_url": url,
-            "cover_url": video_info.get("thumbnail", ""),
-            "source": "youtube"
-        }
-
-        return track_info
-    except subprocess.TimeoutExpired:
-        st.error("⏱️ Request timed out. YouTube may be slow or blocked.")
-        return None
-    except json.JSONDecodeError as e:
-        st.error(f"❌ Failed to parse video info: {str(e)}")
-        return None
-    except Exception as e:
-        st.error(f"❌ Error fetching video: {str(e)}")
-        return None
+            
+        except subprocess.TimeoutExpired:
+            continue
+        except Exception:
+            continue
+    
+    # All methods failed - create basic track info from URL
+    st.warning("⚠️ Could not fetch video details, but will still attempt download")
+    
+    # Extract video ID
+    video_id = None
+    if 'watch?v=' in url:
+        video_id = url.split('watch?v=')[1].split('&')[0]
+    elif 'youtu.be/' in url:
+        video_id = url.split('youtu.be/')[1].split('?')[0]
+    
+    # Return basic track info - download will still work
+    return {
+        "id": video_id or "unknown",
+        "name": f"YouTube Video {video_id}" if video_id else "YouTube Video",
+        "artists": "YouTube",
+        "album": "",
+        "duration_ms": 0,
+        "youtube_url": url,
+        "cover_url": f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg" if video_id else "",
+        "source": "youtube"
+    }
 
 
 # ---------------- Helper Functions ----------------
@@ -397,14 +459,14 @@ def download_track_multisource(track_info, output_dir, audio_format="m4a", quali
 
     # If the track is from YouTube, try direct URL first
     sources = []
-
+    
     if track_info.get("source") == "youtube" and track_info.get("youtube_url"):
         sources.append({
             "name": "YouTube (Direct)",
             "url": track_info["youtube_url"],
             "extra_args": []
         })
-
+    
     # Add search-based sources
     sources.extend([
         {
@@ -449,15 +511,15 @@ def download_track_multisource(track_info, output_dir, audio_format="m4a", quali
                 '-f', format_arg,
                 '-o', output_template,
                 '--no-playlist',
-                '--quiet',
                 '--no-warnings',
                 '--extract-audio',
                 '--no-check-certificates',
                 '--socket-timeout', '30',
-                '--retries', '3',
+                '--retries', '5',
                 '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 '--match-filter', '!is_live & !was_live',
                 '--default-search', 'ytsearch',
+                '--extractor-args', 'youtube:player_client=android,web',
             ]
 
             # Add source-specific args
@@ -573,10 +635,10 @@ if fetch_btn:
     else:
         try:
             platform = detect_platform(playlist_url)
-
+            
             if not platform:
                 st.error("❌ Unsupported URL. Please use Spotify or YouTube/YouTube Music URLs.")
-
+            
             # Handle Spotify
             elif platform in ['spotify_playlist', 'spotify_track']:
                 with st.spinner("Authenticating with Spotify..."):
@@ -601,8 +663,7 @@ if fetch_btn:
                             use_container_width=True,
                             height=400
                         )
-                        st.info(
-                            f"**{playlist_data.get('name')}** by {playlist_data.get('owner', {}).get('display_name')}")
+                        st.info(f"**{playlist_data.get('name')}** by {playlist_data.get('owner', {}).get('display_name')}")
                     else:
                         st.warning("No tracks found in playlist")
 
@@ -622,17 +683,17 @@ if fetch_btn:
                         use_container_width=True
                     )
                     st.info(f"**{track_info['name']}** by {track_info['artists']}")
-
+            
             # Handle YouTube/YouTube Music
             elif platform == 'youtube_playlist':
                 with st.spinner("Fetching YouTube playlist..."):
                     tracks = fetch_youtube_playlist(playlist_url)
-
+                
                 if tracks:
                     st.session_state.playlist_tracks = tracks
                     st.session_state.playlist_name = "YouTube Playlist"
                     st.session_state.content_type = "playlist"
-
+                    
                     st.success(f"✅ Found {len(tracks)} videos in YouTube playlist")
                     df = pd.DataFrame(tracks)
                     st.dataframe(
@@ -642,16 +703,16 @@ if fetch_btn:
                     )
                 else:
                     st.error("❌ Failed to fetch YouTube playlist")
-
+            
             elif platform == 'youtube_track':
                 with st.spinner("Fetching YouTube video..."):
                     track_info = fetch_youtube_track(playlist_url)
-
+                
                 if track_info:
                     st.session_state.playlist_tracks = [track_info]
                     st.session_state.playlist_name = track_info['name']
                     st.session_state.content_type = "track"
-
+                    
                     st.success(f"✅ YouTube video found")
                     df = pd.DataFrame([track_info])
                     st.dataframe(
